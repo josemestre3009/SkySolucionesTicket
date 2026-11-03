@@ -1,0 +1,213 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  ASSISTANT
+  TEAM_LEADER
+  TECHNICIAN
+}
+
+enum TicketStatus {
+  PENDING
+  IN_PROGRESS
+  RESOLVED
+}
+
+model User {
+  id           String        @id @default(uuid()) @db.Uuid
+  name         String
+  email        String        @unique
+  passwordHash String
+  role         Role
+  phone        String?
+  zone         String?
+  active       Boolean       @default(true)
+  assigned     Ticket[]      @relation("AssignedTechnician")
+  notes        TicketNote[]
+  events       TicketEvent[]
+  apiClients   ApiClient[]   @relation("ApiClientCreator")
+  createdDailyTeams DailyTeam[]       @relation("DailyTeamCreator")
+  dailyTeamMemberships DailyTeamMember[] @relation("DailyTeamTechnician")
+  assignedDailyTickets DailyTeamTicket[] @relation("DailyTeamTicketAssigner")
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model ApiClient {
+  id           String        @id @default(uuid()) @db.Uuid
+  name         String
+  keyPrefix    String        @unique
+  keyHash      String        @unique
+  role         Role
+  active       Boolean       @default(true)
+  lastUsedAt   DateTime?
+  createdById  String        @db.Uuid
+  createdBy    User          @relation("ApiClientCreator", fields: [createdById], references: [id])
+  events       TicketEvent[]
+  notes        TicketNote[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+}
+
+model Customer {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  phone     String?
+  email     String?
+  document  String?
+  address   String?
+  tickets   Ticket[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([name])
+  @@index([phone])
+}
+
+model TicketCategory {
+  id        String   @id @default(uuid()) @db.Uuid
+  code      String   @unique
+  name      String   @unique
+  active    Boolean  @default(true)
+  fields    Json     @default("[]")
+  tickets   Ticket[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PendingReason {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String   @unique
+  active    Boolean  @default(true)
+  tickets   Ticket[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model CompanySettings {
+  id            String   @id @default("default")
+  companyName   String   @default("Sky Soluciones")
+  supportPhone  String?
+  supportEmail  String?
+  timezone      String   @default("America/Bogota")
+  ticketPrefix  String   @default("TK")
+  businessHours String?
+  updatedAt     DateTime @updatedAt
+}
+
+model WispHubSettings {
+  id              String   @id @default("default")
+  baseUrl         String   @default("https://api.wisphub.net/api/")
+  apiKeyEncrypted String?
+  enabled         Boolean  @default(false)
+  updatedAt       DateTime @updatedAt
+}
+
+model Ticket {
+  id              String         @id @default(uuid()) @db.Uuid
+  number          Int            @unique @default(autoincrement())
+  title           String
+  description     String?
+  status          TicketStatus   @default(PENDING)
+  customFields    Json           @default("{}")
+  scheduledAt     DateTime?
+  resolvedAt      DateTime?
+  pendingNote     String?
+  customerId      String         @db.Uuid
+  customer        Customer       @relation(fields: [customerId], references: [id])
+  categoryId      String         @db.Uuid
+  category        TicketCategory @relation(fields: [categoryId], references: [id])
+  assignedToId    String?        @db.Uuid
+  assignedTo      User?          @relation("AssignedTechnician", fields: [assignedToId], references: [id])
+  pendingReasonId String?        @db.Uuid
+  pendingReason   PendingReason? @relation(fields: [pendingReasonId], references: [id])
+  notes           TicketNote[]
+  events          TicketEvent[]
+  dailyTeamAssignments DailyTeamTicket[]
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([status, assignedToId, scheduledAt])
+  @@index([categoryId, createdAt])
+  @@index([customerId])
+}
+
+model TicketNote {
+  id        String   @id @default(uuid()) @db.Uuid
+  body      String
+  ticketId  String   @db.Uuid
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId    String?    @db.Uuid
+  author      User?      @relation(fields: [authorId], references: [id])
+  apiClientId String?    @db.Uuid
+  apiClient   ApiClient? @relation(fields: [apiClientId], references: [id])
+  createdAt DateTime @default(now())
+}
+
+model TicketEvent {
+  id        String   @id @default(uuid()) @db.Uuid
+  type      String
+  data      Json     @default("{}")
+  ticketId  String   @db.Uuid
+  ticket    Ticket   @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  actorId     String?    @db.Uuid
+  actor       User?      @relation(fields: [actorId], references: [id])
+  apiClientId String?    @db.Uuid
+  apiClient   ApiClient? @relation(fields: [apiClientId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+}
+
+model DailyTeam {
+  id          String            @id @default(uuid()) @db.Uuid
+  workDate    DateTime          @db.Date
+  name        String
+  createdById String            @db.Uuid
+  createdBy   User              @relation("DailyTeamCreator", fields: [createdById], references: [id])
+  members     DailyTeamMember[]
+  tickets     DailyTeamTicket[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@unique([id, workDate])
+  @@unique([workDate, name])
+  @@index([workDate])
+}
+
+model DailyTeamMember {
+  id           String    @id @default(uuid()) @db.Uuid
+  dailyTeamId  String    @db.Uuid
+  workDate     DateTime  @db.Date
+  technicianId String    @db.Uuid
+  dailyTeam    DailyTeam @relation(fields: [dailyTeamId, workDate], references: [id, workDate], onDelete: Cascade)
+  technician   User      @relation("DailyTeamTechnician", fields: [technicianId], references: [id], onDelete: Restrict)
+  createdAt    DateTime  @default(now())
+
+  @@unique([technicianId, workDate])
+  @@unique([dailyTeamId, technicianId])
+  @@index([dailyTeamId, workDate])
+}
+
+model DailyTeamTicket {
+  id           String    @id @default(uuid()) @db.Uuid
+  dailyTeamId  String    @db.Uuid
+  workDate     DateTime  @db.Date
+  ticketId     String    @db.Uuid
+  assignedById String    @db.Uuid
+  dailyTeam    DailyTeam @relation(fields: [dailyTeamId, workDate], references: [id, workDate], onDelete: Cascade)
+  ticket       Ticket    @relation(fields: [ticketId], references: [id], onDelete: Restrict)
+  assignedBy   User      @relation("DailyTeamTicketAssigner", fields: [assignedById], references: [id], onDelete: Restrict)
+  createdAt    DateTime  @default(now())
+
+  @@unique([ticketId, workDate])
+  @@unique([dailyTeamId, ticketId])
+  @@index([dailyTeamId, workDate])
+}
