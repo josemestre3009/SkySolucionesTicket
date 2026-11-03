@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, ReactNode, useEffect, useRef, useState } from "react";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../lib/api";
 
 type Role = "ADMIN" | "ASSISTANT" | "TEAM_LEADER" | "TECHNICIAN";
@@ -13,7 +13,7 @@ type User = {
   zone?: string;
   phone?: string;
 };
-type View = "overview" | "planning" | "tickets" | "employees" | "config";
+type View = "overview" | "planning" | "tickets" | "config";
 type Category = {
   id: string;
   code: string;
@@ -54,6 +54,26 @@ type WispHubClient = {
   mapUrl: string | null;
 };
 type TicketStatus = "PENDING" | "IN_PROGRESS" | "RESOLVED";
+type DailyTicketOutcome = "PENDING" | "DONE" | "NOT_DONE";
+type ExecutionParticipant = {
+  id: string;
+  userId?: string | null;
+  name: string;
+  role: Role;
+};
+type DailyExecution = {
+  id: string;
+  workDate: string;
+  outcome: DailyTicketOutcome;
+  outcomeNote?: string | null;
+  deferredTo?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  pendingReason?: Reason | null;
+  completedBy?: { id: string; name: string } | null;
+  participants: ExecutionParticipant[];
+  dailyTeam: { id: string; name: string };
+};
 type Ticket = {
   id: string;
   number: number;
@@ -88,25 +108,46 @@ type Ticket = {
     actor?: { name: string };
     apiClient?: { name: string };
   }[];
+  dailyTeamAssignments?: DailyExecution[];
+};
+type DailyTeamTicketAssignment = {
+  id: string;
+  workDate: string;
+  outcome: DailyTicketOutcome;
+  outcomeNote?: string | null;
+  deferredTo?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  pendingReason?: Reason | null;
+  completedBy?: { id: string; name: string } | null;
+  participants: ExecutionParticipant[];
+  ticket: Ticket;
 };
 type DailyTeam = {
   id: string;
   name: string;
   workDate: string;
   members: { technician: User }[];
-  tickets: { ticket: Ticket }[];
+  tickets: DailyTeamTicketAssignment[];
 };
 type DailyPlanningData = {
   date: string;
+  today: string;
   teams: DailyTeam[];
   technicians: User[];
   unplannedTickets: Ticket[];
+  pendingReasons: Reason[];
 };
 
 const statusLabels: Record<TicketStatus, string> = {
   PENDING: "Pendiente",
   IN_PROGRESS: "En curso",
   RESOLVED: "Realizado",
+};
+const outcomeLabels: Record<DailyTicketOutcome, string> = {
+  PENDING: "Pendiente",
+  DONE: "Realizado",
+  NOT_DONE: "No se pudo",
 };
 
 export default function Home() {
@@ -121,7 +162,7 @@ export default function Home() {
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [view, setView] = useState<View>("overview");
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState<TicketStatus | "ALL">("ALL");
+  const [status, setStatus] = useState<TicketStatus | "ALL">("PENDING");
   const [newOpen, setNewOpen] = useState(false);
   const [employeeOpen, setEmployeeOpen] = useState(false);
   const [error, setError] = useState("");
@@ -272,20 +313,15 @@ export default function Home() {
             )}
           </div>
         )}
-        {view === "employees" && user.role === "ADMIN" && (
-          <Employees
-            users={users}
-            tickets={tickets}
-            onNew={() => setEmployeeOpen(true)}
-            onChanged={load}
-          />
-        )}
         {view === "config" && user.role === "ADMIN" && company && wisphub && (
           <Settings
             categories={categories}
             reasons={allReasons}
             company={company}
             wisphub={wisphub}
+            users={users}
+            tickets={tickets}
+            onNewEmployee={() => setEmployeeOpen(true)}
             onChanged={load}
           />
         )}
@@ -356,14 +392,6 @@ function Sidebar({
           active={view === "tickets"}
           onClick={() => onView("tickets")}
         />
-        {user.role === "ADMIN" && (
-          <NavButton
-            icon="users"
-            label="Empleados"
-            active={view === "employees"}
-            onClick={() => onView("employees")}
-          />
-        )}
         {user.role === "ADMIN" && (
           <NavButton
             icon="settings"
@@ -609,9 +637,14 @@ function DailyPlanning({ user }: { user: User }) {
   const [category, setCategory] = useState("ALL");
   const [population, setPopulation] = useState("ALL");
   const [editor, setEditor] = useState<DailyTeam | "new" | null>(null);
+  const [outcomeEditor, setOutcomeEditor] = useState<{ teamId: string; ticketId: string; number: number } | null>(null);
+  const [outcomeReason, setOutcomeReason] = useState("");
+  const [outcomeNote, setOutcomeNote] = useState("");
+  const [outcomeDate, setOutcomeDate] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const canManage = user.role === "ADMIN" || user.role === "TEAM_LEADER";
+  const canOperate = data?.today === date;
 
   async function loadPlanning(nextDate = date) {
     setData(await api<DailyPlanningData>(`/daily-planning?date=${nextDate}`));
@@ -628,14 +661,14 @@ function DailyPlanning({ user }: { user: User }) {
     next.setDate(next.getDate() + days);
     setDate(localDateValue(next));
   }
-  async function assign(teamId: string) {
-    if (!selected.length) return;
+  async function assign(teamId: string, ticketIds = selected, focusTeam = true) {
+    if (!ticketIds.length) return;
     setBusy(true);
     try {
-      await api(`/daily-teams/${teamId}/tickets`, { method: "POST", body: JSON.stringify({ ticketIds: selected }) });
-      setMessage(`${selected.length} ticket${selected.length === 1 ? "" : "s"} asignado${selected.length === 1 ? "" : "s"}.`);
+      await api(`/daily-teams/${teamId}/tickets`, { method: "POST", body: JSON.stringify({ ticketIds }) });
+      setMessage(`${ticketIds.length} ticket${ticketIds.length === 1 ? "" : "s"} asignado${ticketIds.length === 1 ? "" : "s"}.`);
       await loadPlanning();
-      setActiveTab(teamId);
+      if (focusTeam) setActiveTab(teamId);
     } catch (caught) { setMessage((caught as Error).message); }
     finally { setBusy(false); }
   }
@@ -647,26 +680,82 @@ function DailyPlanning({ user }: { user: User }) {
     } catch (caught) { setMessage((caught as Error).message); }
     finally { setBusy(false); }
   }
-  async function changeStatus(ticketId: string, status: TicketStatus) {
+  async function startVisit(teamId: string, ticketId: string) {
     setBusy(true);
     try {
-      await api(`/tickets/${ticketId}/status`, { method: "PATCH", body: JSON.stringify({ status }) });
+      await api(`/daily-teams/${teamId}/tickets/${ticketId}/start`, { method: "POST" });
       await loadPlanning();
     } catch (caught) { setMessage((caught as Error).message); }
     finally { setBusy(false); }
   }
-  const categories = Array.from(new Map((data?.unplannedTickets ?? []).map((ticket) => [ticket.category.id, ticket.category])).values());
-  const populations = Array.from(
-    new Set((data?.unplannedTickets ?? []).map(ticketPopulation).filter(Boolean)),
-  ).sort((left, right) => left.localeCompare(right, "es"));
-  const visibleTickets = (data?.unplannedTickets ?? []).filter((ticket) => {
-    const text = `${ticket.number} ${ticket.customer.name} ${ticket.customer.address ?? ""} ${ticket.title}`.toLowerCase();
-    return text.includes(query.toLowerCase()) &&
-      (category === "ALL" || ticket.category.id === category) &&
-      (population === "ALL" || ticketPopulation(ticket) === population);
-  });
-  const occupiedIds = new Set((data?.teams ?? []).flatMap((team) => team.members.map((member) => member.technician.id)));
-  const activeTeam = data?.teams.find((team) => team.id === activeTab);
+  async function finishVisit(teamId: string, ticketId: string, outcome: "DONE" | "NOT_DONE", extra: Record<string, string | undefined> = {}) {
+    setBusy(true);
+    try {
+      await api(`/daily-teams/${teamId}/tickets/${ticketId}/outcome`, { method: "PATCH", body: JSON.stringify({ outcome, ...extra }) });
+      setMessage(outcome === "DONE" ? "Visita registrada como realizada." : "Visita registrada como no realizada.");
+      await loadPlanning();
+      return true;
+    } catch (caught) { setMessage((caught as Error).message); return false; }
+    finally { setBusy(false); }
+  }
+  function openNotDone(teamId: string, ticketId: string, number: number) {
+    setOutcomeEditor({ teamId, ticketId, number });
+    setOutcomeReason("");
+    setOutcomeNote("");
+    setOutcomeDate("");
+  }
+  async function submitNotDone(event: FormEvent) {
+    event.preventDefault();
+    if (!outcomeEditor) return;
+    if (!outcomeReason && !outcomeNote.trim()) { setMessage("Indique un motivo o una nota."); return; }
+    if (await finishVisit(outcomeEditor.teamId, outcomeEditor.ticketId, "NOT_DONE", {
+      pendingReasonId: outcomeReason || undefined,
+      note: outcomeNote.trim() || undefined,
+      deferredTo: outcomeDate || undefined,
+    })) setOutcomeEditor(null);
+  }
+  const teams = useMemo(() => data?.teams ?? [], [data]);
+  const unplannedTickets = useMemo(() => data?.unplannedTickets ?? [], [data]);
+  const selectedIds = useMemo(() => new Set(selected), [selected]);
+  const categories = useMemo(
+    () => Array.from(new Map(unplannedTickets.map((ticket) => [ticket.category.id, ticket.category])).values()),
+    [unplannedTickets],
+  );
+  const populations = useMemo(
+    () => Array.from(new Set(unplannedTickets.map(ticketPopulation).filter(Boolean)))
+      .sort((left, right) => left.localeCompare(right, "es")),
+    [unplannedTickets],
+  );
+  const visibleTickets = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return unplannedTickets.filter((ticket) => {
+      const text = `${ticket.number} ${ticket.customer.name} ${ticket.customer.address ?? ""} ${ticket.title}`.toLowerCase();
+      return text.includes(needle) &&
+        (category === "ALL" || ticket.category.id === category) &&
+        (population === "ALL" || ticketPopulation(ticket) === population);
+    });
+  }, [unplannedTickets, query, category, population]);
+  const visibleIds = useMemo(() => visibleTickets.map((ticket) => ticket.id), [visibleTickets]);
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.has(id));
+  const occupiedIds = useMemo(
+    () => new Set(teams.flatMap((team) => team.members.map((member) => member.technician.id))),
+    [teams],
+  );
+  const activeTeamId = teams.some((team) => team.id === activeTab)
+    ? activeTab
+    : user.role === "TECHNICIAN" && teams[0]
+      ? teams[0].id
+      : "unplanned";
+
+  function toggleSelected(id: string) {
+    setSelected((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  }
+  function toggleVisible() {
+    const ids = new Set(visibleIds);
+    setSelected((current) => visibleIds.every((id) => current.includes(id))
+      ? current.filter((id) => !ids.has(id))
+      : Array.from(new Set([...current, ...visibleIds])));
+  }
   return (
     <div className="page planning-page">
       <header className="planning-header">
@@ -679,48 +768,146 @@ function DailyPlanning({ user }: { user: User }) {
       <section className="planning-date">
         <button aria-label="Día anterior" onClick={() => moveDate(-1)}><Icon name="back" /></button>
         <button className="today-button" onClick={() => setDate(todayValue())}>Hoy</button>
-        <label><span>{formatPlanningDate(date)}</span><input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label>
+        <label><span>{formatPlanningDate(date)}</span><input type="date" aria-label="Fecha del plan" value={date} onChange={(event) => event.target.value && setDate(event.target.value)} /></label>
         <button aria-label="Día siguiente" onClick={() => moveDate(1)}><Icon name="chevron" /></button>
       </section>
       <div className="planning-summary">
-        <span><b>{data?.teams.length ?? 0}</b> cuadrillas</span>
+        <span><b>{teams.length}</b> cuadrillas</span>
         <span><b>{occupiedIds.size}</b> técnicos asignados</span>
-        {user.role !== "TECHNICIAN" && <span><b>{data?.unplannedTickets.length ?? 0}</b> sin planificar</span>}
+        {user.role !== "TECHNICIAN" && <span><b>{unplannedTickets.length}</b> sin planificar</span>}
       </div>
-      <nav className="planning-tabs">
-        {user.role !== "TECHNICIAN" && <button className={activeTab === "unplanned" ? "active" : ""} onClick={() => setActiveTab("unplanned")}>Sin planificar <b>{data?.unplannedTickets.length ?? 0}</b></button>}
-        {data?.teams.map((team) => <button key={team.id} className={activeTab === team.id ? "active" : ""} onClick={() => setActiveTab(team.id)}>{team.name} <b>{team.tickets.length}</b></button>)}
+      <nav className="planning-tabs" aria-label="Cuadrillas del día">
+        {user.role !== "TECHNICIAN" && <button className={activeTeamId === "unplanned" ? "active" : ""} onClick={() => setActiveTab("unplanned")}>Sin planificar <b>{unplannedTickets.length}</b></button>}
+        {teams.map((team) => <button key={team.id} className={activeTeamId === team.id ? "active" : ""} onClick={() => setActiveTab(team.id)}>{team.name} <b>{team.tickets.length}</b></button>)}
       </nav>
       <div className="planning-layout">
-        {user.role !== "TECHNICIAN" && <section className={`planning-unplanned ${activeTab !== "unplanned" ? "mobile-hidden" : ""}`}>
+        {user.role !== "TECHNICIAN" && <section className={`planning-unplanned ${activeTeamId !== "unplanned" ? "mobile-hidden" : ""}`} aria-label="Tickets sin planificar">
+          <div className="planning-panel-head">
+            <div>
+              <span className="eyebrow">Por asignar</span>
+              <h3>Sin planificar <b>{unplannedTickets.length}</b></h3>
+            </div>
+            {visibleTickets.length !== unplannedTickets.length && <small>{visibleTickets.length} visibles</small>}
+          </div>
           <div className="planning-tools">
-            <label className="search"><Icon name="search" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Cliente, población o ticket" /></label>
-            <select value={category} onChange={(event) => setCategory(event.target.value)}><option value="ALL">Todas las categorías</option>{categories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
-            <select value={population} onChange={(event) => setPopulation(event.target.value)}><option value="ALL">Todas las poblaciones</option>{populations.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+            <label className="search"><Icon name="search" /><input aria-label="Buscar tickets sin planificar" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Cliente, población o ticket" /></label>
+            <select aria-label="Filtrar por categoría" value={category} onChange={(event) => setCategory(event.target.value)}><option value="ALL">Todas las categorías</option>{categories.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+            <select aria-label="Filtrar por población" value={population} onChange={(event) => setPopulation(event.target.value)}><option value="ALL">Todas las poblaciones</option>{populations.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+          </div>
+          <div className="planning-list-toolbar">
+            <span>{visibleTickets.length} ticket{visibleTickets.length === 1 ? "" : "s"}</span>
+            {canManage && visibleTickets.length > 0 && <button className="text-button" onClick={toggleVisible}>{allVisibleSelected ? "Quitar visibles" : "Seleccionar visibles"}</button>}
           </div>
           <div className="planning-ticket-list">
-            {visibleTickets.map((ticket) => <label className={`planning-ticket ${selected.includes(ticket.id) ? "selected" : ""}`} key={ticket.id}>
-              {canManage && <input type="checkbox" checked={selected.includes(ticket.id)} onChange={() => setSelected((current) => current.includes(ticket.id) ? current.filter((id) => id !== ticket.id) : [...current, ticket.id])} />}
-              <span><b>TK-{ticket.number}</b><strong>{ticket.customer.name}</strong><small>{ticket.customer.address || "Sin dirección"}</small></span>
-              <StatusBadge status={ticket.status} />
-            </label>)}
-            {!visibleTickets.length && <Empty icon="check" title="Todo organizado" text="No hay tickets disponibles con estos filtros." />}
+            {visibleTickets.map((ticket) => {
+              const checkboxId = `planning-ticket-${ticket.id}`;
+              const lastAttempt = ticket.dailyTeamAssignments?.[0];
+              const summary = <>
+                <b>TK-{ticket.number}</b>
+                <strong>{ticket.customer.name}</strong>
+                <small>{ticket.customer.address || "Sin dirección"}</small>
+                {lastAttempt?.outcome === "NOT_DONE" && <small className="retry-note">Reintento · {lastAttempt.pendingReason?.name || lastAttempt.outcomeNote || "No realizado"}</small>}
+              </>;
+              return <div className={`planning-ticket ${selectedIds.has(ticket.id) ? "selected" : ""}`} key={ticket.id}>
+                {canManage && <input id={checkboxId} type="checkbox" checked={selectedIds.has(ticket.id)} onChange={() => toggleSelected(ticket.id)} aria-label={`Seleccionar TK-${ticket.number}`} />}
+                {canManage
+                  ? <label className="planning-ticket-main" htmlFor={checkboxId}>{summary}</label>
+                  : <div className="planning-ticket-main">{summary}</div>}
+                <div className="planning-ticket-actions">
+                  <StatusBadge status={ticket.status} />
+                  {canManage && teams.length > 0 && <select aria-label={`Asignar TK-${ticket.number} a una cuadrilla`} defaultValue="" disabled={busy} onChange={(event) => {
+                    const teamId = event.target.value;
+                    event.target.value = "";
+                    if (teamId) assign(teamId, [ticket.id], false);
+                  }}>
+                    <option value="">Asignar...</option>
+                    {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+                  </select>}
+                </div>
+              </div>;
+            })}
+            {!visibleTickets.length && (unplannedTickets.length
+              ? <Empty icon="search" title="Sin coincidencias" text="Ajusta la búsqueda o los filtros." />
+              : <Empty icon="check" title="Todo planificado" text="No quedan tickets pendientes para este día." />)}
           </div>
         </section>}
-        <section className={`planning-teams ${user.role !== "TECHNICIAN" && activeTab === "unplanned" ? "mobile-hidden" : ""}`}>
-          {(activeTeam ? [activeTeam] : data?.teams ?? []).map((team) => <article className="daily-team" key={team.id}>
-            <header><div><h3>{team.name}</h3><p>{team.members.map((member) => member.technician.name).join(" · ") || "Sin integrantes"}</p></div>{canManage && <button className="icon-button" aria-label={`Editar ${team.name}`} onClick={() => setEditor(team)}><Icon name="settings" /></button>}</header>
+        <section className={`planning-teams ${user.role !== "TECHNICIAN" && activeTeamId === "unplanned" ? "mobile-hidden" : ""}`} aria-label="Cuadrillas del día">
+          {teams.map((team) => <article className={`daily-team ${activeTeamId === team.id ? "active" : ""}`} key={team.id}>
+            <header>
+              <div>
+                <h3>{team.name}<span className="team-count">{team.tickets.length}</span></h3>
+                <p className="team-members">{team.members.map((member) => member.technician.name).join(" · ") || "Sin integrantes"}</p>
+              </div>
+              {canManage && <button className="icon-button" aria-label={`Editar ${team.name}`} onClick={() => setEditor(team)}><Icon name="settings" /></button>}
+            </header>
             {canManage && selected.length > 0 && <button className="assign-selected" disabled={busy} onClick={() => assign(team.id)}>Asignar {selected.length} seleccionado{selected.length === 1 ? "" : "s"}</button>}
             <div className="team-tickets">
-              {team.tickets.map(({ ticket }) => <div className="team-ticket" key={ticket.id}><span><b>TK-{ticket.number} · {ticket.category.name}</b><strong>{ticket.customer.name}</strong><small>{ticket.customer.address || "Sin dirección"}</small></span>{user.role !== "TEAM_LEADER" ? <select aria-label={`Estado TK-${ticket.number}`} disabled={busy || (user.role === "TECHNICIAN" && ticket.status === "RESOLVED")} value={ticket.status} onChange={(event) => changeStatus(ticket.id, event.target.value as TicketStatus)}>{Object.entries(statusLabels).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select> : <StatusBadge status={ticket.status} />}{canManage && <button disabled={busy} aria-label="Retirar de cuadrilla" onClick={() => unassign(team.id, ticket.id)}><Icon name="close" /></button>}</div>)}
+              {team.tickets.map((assignment) => {
+                const { ticket } = assignment;
+                const lastAttempt = ticket.dailyTeamAssignments?.[0];
+                const canEdit = canOperate && assignment.outcome === "PENDING";
+                return <div className="team-ticket" key={ticket.id}>
+                  <div className="team-ticket-main">
+                    <b>TK-{ticket.number} · {ticket.category.name}</b>
+                    <strong>{ticket.customer.name}</strong>
+                    <small>{ticket.customer.address || "Sin dirección"}</small>
+                    {lastAttempt?.outcome === "NOT_DONE" && <small className="retry-note">Reintento · {lastAttempt.pendingReason?.name || lastAttempt.outcomeNote || "No realizado"}{lastAttempt.completedBy?.name ? ` · ${lastAttempt.completedBy.name}` : ""}</small>}
+                    {assignment.outcome !== "PENDING" && <small className="execution-context">
+                      {outcomeLabels[assignment.outcome]} · {assignment.completedBy?.name || "Sin actor"} · {assignment.completedAt ? formatDate(assignment.completedAt) : "Sin fecha"}
+                      {assignment.pendingReason?.name ? ` · ${assignment.pendingReason.name}` : ""}
+                      {assignment.outcomeNote ? ` · ${assignment.outcomeNote}` : ""}
+                      {assignment.deferredTo ? ` · Reprogramado ${formatPlanningDate(assignment.deferredTo.slice(0, 10))}` : ""}
+                    </small>}
+                    {assignment.participants.length > 0 && <small className="execution-context">Participantes: {assignment.participants.map((participant) => participant.name).join(" · ")}</small>}
+                  </div>
+                  <div className="team-ticket-actions">
+                    <StatusBadge status={ticket.status} />
+                    {canEdit && <div className="execution-actions">
+                      {!assignment.startedAt && <button disabled={busy} onClick={() => startVisit(team.id, ticket.id)}>Iniciar</button>}
+                      <button className="success" disabled={busy} onClick={() => finishVisit(team.id, ticket.id, "DONE")}>Realizado</button>
+                      <button className="danger" disabled={busy} onClick={() => openNotDone(team.id, ticket.id, ticket.number)}>No se pudo</button>
+                    </div>}
+                    {canManage && assignment.outcome === "PENDING" && <button disabled={busy} aria-label={`Retirar TK-${ticket.number} de ${team.name}`} onClick={() => unassign(team.id, ticket.id)}><Icon name="close" /></button>}
+                  </div>
+                </div>;
+              })}
               {!team.tickets.length && <p className="team-empty">Aún no tiene trabajos asignados.</p>}
             </div>
           </article>)}
-          {!data?.teams.length && <Empty icon="users" title="Sin cuadrillas" text={canManage ? "Crea la primera cuadrilla para este día." : "No hay cuadrillas para este día."} />}
+          {!teams.length && <Empty icon="users" title="Sin cuadrillas" text={canManage ? "Crea la primera cuadrilla para este día." : "No hay cuadrillas para este día."} />}
         </section>
       </div>
-      {canManage && selected.length > 0 && <div className="planning-selection"><span><b>{selected.length}</b> seleccionados</span><select defaultValue="" onChange={(event) => event.target.value && assign(event.target.value)} disabled={busy}><option value="">Asignar a...</option>{data?.teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}</select></div>}
+      {canManage && selected.length > 0 && <div className="planning-selection" role="region" aria-label="Asignación rápida">
+        <span aria-live="polite"><b>{selected.length}</b> seleccionado{selected.length === 1 ? "" : "s"}</span>
+        <div className="planning-selection-actions">
+          <select aria-label="Asignar seleccionados a una cuadrilla" defaultValue="" onChange={(event) => {
+            const teamId = event.target.value;
+            event.target.value = "";
+            if (teamId) assign(teamId);
+          }} disabled={busy}>
+            <option value="">Asignar a...</option>
+            {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+          </select>
+          <button className="icon-button" aria-label="Limpiar selección" onClick={() => setSelected([])}><Icon name="close" /></button>
+        </div>
+      </div>}
       {editor && data && <DailyTeamEditor team={editor} date={date} technicians={data.technicians} occupiedIds={occupiedIds} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await loadPlanning(); }} />}
+      {outcomeEditor && <div className="planning-sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setOutcomeEditor(null)}>
+        <form className="planning-sheet outcome-sheet" role="dialog" aria-modal="true" aria-labelledby="outcome-sheet-title" onSubmit={submitNotDone}>
+          <header>
+            <div><span className="eyebrow">TK-{outcomeEditor.number} · {formatPlanningDate(date)}</span><h2 id="outcome-sheet-title">No se pudo realizar</h2></div>
+            <button type="button" className="icon-button" aria-label="Cerrar" onClick={() => setOutcomeEditor(null)}><Icon name="close" /></button>
+          </header>
+          <label className="field"><span>Motivo</span><select value={outcomeReason} onChange={(event) => setOutcomeReason(event.target.value)}><option value="">Seleccionar motivo</option>{(data?.pendingReasons ?? []).map((reason) => <option key={reason.id} value={reason.id}>{reason.name}</option>)}</select></label>
+          <label className="field"><span>Nota</span><textarea rows={3} value={outcomeNote} onChange={(event) => setOutcomeNote(event.target.value)} placeholder="Detalle de la visita" /></label>
+          <label className="field"><span>Nueva fecha (opcional)</span><input type="date" min={data?.today ?? date} value={outcomeDate} onChange={(event) => setOutcomeDate(event.target.value)} /></label>
+          <p className="outcome-hint">La reprogramación no asigna automáticamente una cuadrilla futura.</p>
+          <footer>
+            <button type="button" className="ghost-button" onClick={() => setOutcomeEditor(null)}>Cancelar</button>
+            <button className="primary-button" disabled={busy}>{busy ? "Guardando..." : "Registrar no realizado"}</button>
+          </footer>
+        </form>
+      </div>}
       {message && <Toast message={message} close={() => setMessage("")} />}
     </div>
   );
@@ -732,6 +919,11 @@ function DailyTeamEditor({ team, date, technicians, occupiedIds, onClose, onSave
   const [members, setMembers] = useState<string[]>(currentIds);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
   async function save() {
     setSaving(true); setError("");
     try {
@@ -745,7 +937,24 @@ function DailyTeamEditor({ team, date, technicians, occupiedIds, onClose, onSave
     try { await api(`/daily-teams/${team.id}`, { method: "DELETE" }); await onSaved(); }
     catch (caught) { setError((caught as Error).message); setSaving(false); }
   }
-  return <div className="planning-sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><section className="planning-sheet"><header><div><span className="eyebrow">{formatPlanningDate(date)}</span><h2>{team === "new" ? "Nueva cuadrilla" : "Editar cuadrilla"}</h2></div><button className="icon-button" onClick={onClose}><Icon name="close" /></button></header><label className="field"><span>Nombre</span><input value={name} onChange={(event) => setName(event.target.value)} /></label><div className="member-picker"><strong>Integrantes</strong>{technicians.map((technician) => { const occupied = occupiedIds.has(technician.id) && !currentIds.includes(technician.id); return <label className={occupied ? "occupied" : ""} key={technician.id}><input type="checkbox" disabled={occupied} checked={members.includes(technician.id)} onChange={() => setMembers((current) => current.includes(technician.id) ? current.filter((id) => id !== technician.id) : [...current, technician.id])} /><Avatar name={technician.name} /><span><b>{technician.name}</b><small>{occupied ? "Ya está en otra cuadrilla" : technician.zone || "Sin zona"}</small></span></label>; })}</div>{error && <p className="form-error">{error}</p>}<footer>{team !== "new" && <button className="danger-button" disabled={saving} onClick={remove}>Eliminar</button>}<button className="primary-button" disabled={saving || !name.trim()} onClick={save}>{saving ? "Guardando..." : "Guardar cuadrilla"}</button></footer></section></div>;
+  return <div className="planning-sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <section className="planning-sheet" role="dialog" aria-modal="true" aria-labelledby="daily-team-editor-title">
+      <header>
+        <div><span className="eyebrow">{formatPlanningDate(date)}</span><h2 id="daily-team-editor-title">{team === "new" ? "Nueva cuadrilla" : "Editar cuadrilla"}</h2></div>
+        <button className="icon-button" aria-label="Cerrar" onClick={onClose}><Icon name="close" /></button>
+      </header>
+      <label className="field"><span>Nombre</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
+      <div className="member-picker"><strong>Integrantes</strong>{technicians.map((technician) => {
+        const occupied = occupiedIds.has(technician.id) && !currentIds.includes(technician.id);
+        return <label className={occupied ? "occupied" : ""} key={technician.id}><input type="checkbox" disabled={occupied} checked={members.includes(technician.id)} onChange={() => setMembers((current) => current.includes(technician.id) ? current.filter((id) => id !== technician.id) : [...current, technician.id])} /><Avatar name={technician.name} /><span><b>{technician.name}</b><small>{occupied ? "Ya está en otra cuadrilla" : technician.zone || "Sin zona"}</small></span></label>;
+      })}</div>
+      {error && <p className="form-error">{error}</p>}
+      <footer>
+        {team !== "new" && <button className="danger-button" disabled={saving} onClick={remove}>Eliminar</button>}
+        <button className="primary-button" disabled={saving || !name.trim()} onClick={save}>{saving ? "Guardando..." : "Guardar cuadrilla"}</button>
+      </footer>
+    </section>
+  </div>;
 }
 
 function TicketList({
@@ -783,13 +992,8 @@ function TicketList({
         setCopyMessage("No hay tickets pendientes.");
         return;
       }
-      const details = await Promise.all(
-        pending.map((ticket) => api<Ticket>(`/tickets/${ticket.id}`)),
-      );
-      await navigator.clipboard.writeText(
-        details.map(formatTicketForClipboard).join("\n\n--------------------\n\n"),
-      );
-      setCopyMessage(`${details.length} tickets pendientes copiados.`);
+      await navigator.clipboard.writeText(formatPendingReport(pending));
+      setCopyMessage(`${pending.length} tickets pendientes copiados.`);
     } catch (caught) {
       setCopyMessage((caught as Error).message || "No se pudieron copiar los tickets.");
     } finally {
@@ -1029,6 +1233,28 @@ function TicketDetail({
             </select>
           </section>
         )}
+        <section className="detail-section">
+          <div className="section-label">
+            <span>Historial de ejecución</span>
+            <Icon name="clipboard" />
+          </div>
+          <div className="execution-history">
+            {ticket.dailyTeamAssignments?.map((execution) => (
+              <article key={execution.id}>
+                <header>
+                  <strong>{formatPlanningDate(execution.workDate.slice(0, 10))} · {execution.dailyTeam.name}</strong>
+                  <span className={`execution-badge ${execution.outcome.toLowerCase()}`}>{outcomeLabels[execution.outcome]}</span>
+                </header>
+                {execution.participants.length > 0 && <small>Participantes: {execution.participants.map((participant) => participant.name).join(" · ")}</small>}
+                {execution.completedBy && <small>Registrado por {execution.completedBy.name}{execution.completedAt ? ` · ${formatDate(execution.completedAt)}` : ""}</small>}
+                {execution.startedAt && <small>Iniciado {formatDate(execution.startedAt)}</small>}
+                {(execution.pendingReason?.name || execution.outcomeNote) && <p>{[execution.pendingReason?.name, execution.outcomeNote].filter(Boolean).join(" · ")}</p>}
+                {execution.deferredTo && <small>Reprogramado para {formatPlanningDate(execution.deferredTo.slice(0, 10))}</small>}
+              </article>
+            ))}
+            {!ticket.dailyTeamAssignments?.length && <p className="muted">Sin ejecuciones diarias registradas.</p>}
+          </div>
+        </section>
         <section className="detail-section">
           <div className="section-label">
             <span>Notas y actividad</span>
@@ -1732,16 +1958,22 @@ function Settings({
   reasons,
   company,
   wisphub,
+  users,
+  tickets,
+  onNewEmployee,
   onChanged,
 }: {
   categories: Category[];
   reasons: Reason[];
   company: CompanySettings;
   wisphub: WispHubSettings;
+  users: User[];
+  tickets: Ticket[];
+  onNewEmployee: () => void;
   onChanged: () => Promise<void>;
 }) {
   const [tab, setTab] = useState<
-    "services" | "reasons" | "company" | "integrations" | "security"
+    "employees" | "services" | "reasons" | "company" | "integrations" | "security"
   >("services");
   const [editing, setEditing] = useState<Category | null>(null);
   const [error, setError] = useState("");
@@ -1881,6 +2113,16 @@ function Settings({
       <div className="settings-shell">
         <nav className="settings-nav">
           <button
+            className={tab === "employees" ? "active" : ""}
+            onClick={() => setTab("employees")}
+          >
+            <Icon name="users" />
+            <span>
+              <strong>Empleados</strong>
+              <small>Accesos y equipo</small>
+            </span>
+          </button>
+          <button
             className={tab === "services" ? "active" : ""}
             onClick={() => setTab("services")}
           >
@@ -1932,6 +2174,14 @@ function Settings({
           </button>
         </nav>
         <section className="settings-content">
+          {tab === "employees" && (
+            <Employees
+              users={users}
+              tickets={tickets}
+              onNew={onNewEmployee}
+              onChanged={onChanged}
+            />
+          )}
           {tab === "services" && (
             <>
               <div className="settings-section-head">
@@ -2795,6 +3045,71 @@ function formatTicketForClipboard(ticket: Ticket) {
     if (ticket.pendingReason?.name) lines.push(`Motivo pendiente: ${ticket.pendingReason.name}`);
     if (ticket.pendingNote) lines.push(`Observación: ${ticket.pendingNote}`);
   }
+  return lines.join("\n");
+}
+function formatPendingReport(tickets: Ticket[]) {
+  const knownCategories = [
+    { code: "installation", icon: "🏠", label: "Instalaciones" },
+    { code: "failure", icon: "🚨", label: "Revisiones / Fallas" },
+    { code: "upgrade", icon: "📶", label: "Mejoras de servicio" },
+    { code: "removal", icon: "🔄", label: "Retiros" },
+    { code: "transfer", icon: "🔄📶", label: "Traslados" },
+    { code: "iptv", icon: "📡📺", label: "Instalaciones IPTV" },
+  ];
+  const configured = new Set(knownCategories.map(({ code }) => code));
+  const categories = [
+    ...knownCategories,
+    ...Array.from(new Map(
+      tickets
+        .filter((ticket) => !configured.has(ticket.category.code))
+        .map((ticket) => [ticket.category.code, { code: ticket.category.code, icon: "🎫", label: ticket.category.name }]),
+    ).values()),
+  ];
+  const groups = categories.map((category) => ({
+    ...category,
+    tickets: tickets.filter((ticket) => ticket.category.code === category.code),
+  }));
+  const lines = [
+    "*PENDIENTES DEL DÍA*",
+    "",
+    "*📊 Resumen general*",
+    ...groups.map(({ icon, label, tickets: items }) => `${icon} ${label}: ${items.length}`),
+  ];
+  for (const group of groups) {
+    lines.push("", `*${group.icon} ${group.label} (${group.tickets.length})*`);
+    if (!group.tickets.length) {
+      lines.push("• Sin pendientes.");
+      continue;
+    }
+    if (["installation", "removal", "transfer", "iptv"].includes(group.code)) {
+      const byPopulation = new Map<string, { population: string; count: number }>();
+      for (const ticket of group.tickets) {
+        const population = ticketPopulation(ticket) || "Sin población";
+        const key = population.toLocaleLowerCase("es-CO");
+        const current = byPopulation.get(key);
+        byPopulation.set(key, { population: current?.population ?? population, count: (current?.count ?? 0) + 1 });
+      }
+      const names: Record<string, [string, string]> = {
+        installation: ["instalación", "instalaciones"],
+        removal: ["retiro", "retiros"],
+        transfer: ["traslado", "traslados"],
+        iptv: ["instalación IPTV", "instalaciones IPTV"],
+      };
+      for (const { population, count } of byPopulation.values()) {
+        lines.push(`• ${count} ${names[group.code][count === 1 ? 0 : 1]} — ${population}.`);
+      }
+    } else {
+      for (const ticket of group.tickets) {
+        const population = ticketPopulation(ticket) || "Sin población";
+        const generatedTitle = `${ticket.category.name} - ${population} - ${ticket.customer.name}`;
+        const title = ticket.title.trim();
+        const detail = title !== generatedTitle ? title : ticket.description?.trim() || ticket.pendingNote?.trim() || "Sin detalle";
+        lines.push(`• ${population} — ${detail}.`);
+      }
+    }
+    lines.push("", `Total detallado: ${group.tickets.length} ${group.label.toLowerCase()}.`);
+  }
+  lines.push("", `*TOTAL PENDIENTE: ${tickets.length}*`);
   return lines.join("\n");
 }
 function ticketPopulation(ticket: Ticket) {

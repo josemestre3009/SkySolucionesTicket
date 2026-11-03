@@ -7,3 +7,14 @@ export function planningDate(value: string) {
   }
   return date;
 }
+
+// ponytail: one operational timezone for "today"; add per-company timezone only if a second zone is needed.
+export function currentPlanningDate(now = new Date(), timeZone = process.env.APP_TIMEZONE ?? 'America/Bogota') {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(now);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value ?? '';
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+export function currentPlanningWorkDate() {
+  return new Date(`${currentPlanningDate()}T00:00:00.000Z`);
+}

@@ -2,28 +2,39 @@ import { BadRequestException, ForbiddenException, Injectable, NotFoundException 
 import { Prisma, Role, TicketStatus } from '@prisma/client';
 import { Principal } from '../../common/principal';
 import { PrismaService } from '../../infrastructure/prisma.service';
+import { currentPlanningWorkDate } from '../daily-teams/planning-date';
 import { canTransition } from './domain/ticket-workflow';
 import { AddNoteDto, AssignTicketDto, ChangeStatusDto, CreateTicketDto, UpdateTicketDto } from './tickets.dto';
 
 const include = { customer: true, category: true, assignedTo: { select: { id: true, name: true } }, pendingReason: true } as const;
+const executionHistoryInclude = Prisma.validator<Prisma.TicketInclude>()({
+  dailyTeamAssignments: {
+    orderBy: [{ workDate: 'desc' }, { createdAt: 'desc' }],
+    include: {
+      dailyTeam: { select: { id: true, name: true } },
+      participants: { orderBy: { createdAt: 'asc' } },
+      completedBy: { select: { id: true, name: true } },
+      pendingReason: { select: { id: true, name: true } },
+    },
+  },
+});
 const actorData = (p: Principal) => p.kind === 'user' ? { actorId: p.id } : { apiClientId: p.id };
 
 @Injectable()
 export class TicketsService {
   constructor(private prisma: PrismaService) {}
   async list(p: Principal, status?: TicketStatus, q?: string) {
-    const where: Prisma.TicketWhereInput = {
-      ...(p.role === Role.TECHNICIAN ? { OR: [{ assignedToId: p.id }, { dailyTeamAssignments: { some: { dailyTeam: { members: { some: { technicianId: p.id } } } } } }] } : {}),
-      ...(status ? { status } : {}),
-      ...(q ? { OR: [{ title: { contains: q, mode: 'insensitive' } }, { customer: { name: { contains: q, mode: 'insensitive' } } }] } : {}),
-    };
-    return this.prisma.ticket.findMany({ where, include, orderBy: [{ scheduledAt: 'asc' }, { createdAt: 'desc' }], take: 100 });
+    const filters: Prisma.TicketWhereInput[] = [];
+    if (p.role === Role.TECHNICIAN) filters.push(this.technicianScope(p));
+    if (status) filters.push({ status });
+    if (q) filters.push({ OR: [{ title: { contains: q, mode: 'insensitive' } }, { customer: { name: { contains: q, mode: 'insensitive' } } }] });
+    return this.prisma.ticket.findMany({ where: filters.length ? { AND: filters } : {}, include, orderBy: [{ status: 'asc' }, { scheduledAt: 'asc' }, { createdAt: 'desc' }], take: 100 });
   }
   async get(id: string, p: Principal) {
-    const ticket = await this.prisma.ticket.findUnique({ where: { id }, include: { ...include, notes: { include: { author: { select: { name: true } }, apiClient: { select: { name: true } } }, orderBy: { createdAt: 'asc' } }, events: { include: { actor: { select: { name: true } }, apiClient: { select: { name: true } } }, orderBy: { createdAt: 'asc' } } } });
+    const ticket = await this.prisma.ticket.findUnique({ where: { id }, include: { ...include, ...executionHistoryInclude, notes: { include: { author: { select: { name: true } }, apiClient: { select: { name: true } } }, orderBy: { createdAt: 'asc' } }, events: { include: { actor: { select: { name: true } }, apiClient: { select: { name: true } } }, orderBy: { createdAt: 'asc' } } } });
     if (!ticket) throw new NotFoundException('Ticket no encontrado.');
     if (p.role === Role.TECHNICIAN && ticket.assignedToId !== p.id) {
-      const teamAccess = await this.prisma.dailyTeamTicket.count({ where: { ticketId: id, dailyTeam: { members: { some: { technicianId: p.id } } } } });
+      const teamAccess = await this.prisma.dailyTeamTicket.count({ where: { ticketId: id, workDate: currentPlanningWorkDate(), dailyTeam: { members: { some: { technicianId: p.id } } } } });
       if (!teamAccess) throw new ForbiddenException('El ticket no está asignado a este técnico.');
     }
     return ticket;
@@ -73,9 +84,12 @@ export class TicketsService {
     return this.prisma.ticketNote.create({ data: { ticketId: id, body: dto.body, ...(p.kind === 'user' ? { authorId: p.id } : { apiClientId: p.id }) }, include: { author: { select: { name: true } }, apiClient: { select: { name: true } } } });
   }
   async dashboard(p: Principal) {
-    const where: Prisma.TicketWhereInput = p.role === Role.TECHNICIAN ? { OR: [{ assignedToId: p.id }, { dailyTeamAssignments: { some: { dailyTeam: { members: { some: { technicianId: p.id } } } } } }] } : {};
+    const where: Prisma.TicketWhereInput = p.role === Role.TECHNICIAN ? this.technicianScope(p) : {};
     const grouped = await this.prisma.ticket.groupBy({ by: ['status'], where, _count: true });
     return Object.fromEntries(Object.values(TicketStatus).map((status) => [status, grouped.find((x) => x.status === status)?._count ?? 0]));
+  }
+  private technicianScope(p: Principal): Prisma.TicketWhereInput {
+    return { OR: [{ assignedToId: p.id }, { dailyTeamAssignments: { some: { workDate: currentPlanningWorkDate(), dailyTeam: { members: { some: { technicianId: p.id } } } } } }] };
   }
   private async assertTechnician(id: string) {
     const user = await this.prisma.user.findFirst({ where: { id, role: Role.TECHNICIAN, active: true } });
