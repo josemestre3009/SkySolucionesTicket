@@ -100,6 +100,22 @@ body{font-size:15px}.main-nav button{font-size:14px}.profile strong{font-size:14
 @media(min-width:1101px){.planning-unplanned{top:128px;max-height:calc(100vh - 148px)}}
 @media(max-width:480px){.planning-panel-head{padding:13px 11px 0}.planning-panel-head h3{font-size:17px}.planning-ticket{padding:11px 10px;gap:8px}.planning-ticket-actions select{width:100px}.team-ticket-actions select{width:104px}}
 
+/* Daily planning: desktop workspace */
+@media(min-width:1100px){
+  .planning-page{max-width:none;padding:18px 24px 42px}
+  .planning-header{padding:4px 0 18px}.planning-header h2{font-size:32px}.planning-header .primary-button{height:46px;padding:0 18px}
+  .planning-date{max-width:none;grid-template-columns:44px 58px minmax(210px,1fr) 44px;padding:7px;border-radius:15px;box-shadow:none}
+  .planning-summary{gap:10px;padding:12px 0 18px}.planning-summary span{padding:9px 14px;border:1px solid #dceaf2;background:#f1f7fa}.planning-summary b{margin-right:3px}
+  .planning-layout{gap:20px;align-items:start}.planning-unplanned{top:112px;max-height:calc(100vh - 132px);border-radius:20px;box-shadow:0 10px 30px rgba(28,49,68,.07)}
+  .planning-panel-head{padding:18px 17px 4px}.planning-tools{padding:14px 16px;gap:10px}.planning-list-toolbar{padding:10px 16px}
+  .planning-ticket{padding:14px 16px;border-left:3px solid transparent;transition:background .15s,border-color .15s}.planning-ticket:hover{background:#f7fafc;border-left-color:#9cc6df}.planning-ticket.selected{background:#edf6fb;border-left-color:var(--blue)}
+  .planning-teams{gap:18px}.daily-team{border-radius:20px;box-shadow:0 10px 30px rgba(28,49,68,.07)}.daily-team>header{padding:17px 18px;background:linear-gradient(135deg,#f8fbfd,#eef5f8);border-bottom:1px solid var(--line)}
+  .daily-team h3{font-size:17px}.team-members{margin-top:5px}.team-tickets{padding:8px}.team-ticket{margin:0;padding:14px 12px;border:0;border-bottom:1px solid var(--line);border-radius:12px;transition:background .15s}.team-ticket:last-child{border-bottom:0}.team-ticket:hover{background:#f6f9fb}
+  .team-ticket-main{gap:4px}.planning-ticket-main strong,.team-ticket-main strong{font-size:15px}.planning-ticket-main small,.team-ticket-main small{font-size:12px}
+  .team-empty{margin:8px;padding:30px 16px;border:1px dashed #d6e0e6;border-radius:14px;background:#fafcfd;text-align:center}
+}
+@media(min-width:1440px){.planning-layout{grid-template-columns:390px minmax(0,1fr)}.planning-teams{grid-template-columns:repeat(2,minmax(340px,1fr))}}
+
 /* Daily execution result */
 .retry-note{color:#9a641e!important}
 .execution-context{color:#526574!important;line-height:1.35;white-space:normal!important}
