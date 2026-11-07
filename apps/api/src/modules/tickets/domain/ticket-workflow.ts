@@ -9,3 +9,7 @@ const transitions: Record<TicketStatus, TicketStatus[]> = {
 export function canTransition(from: TicketStatus, to: TicketStatus) {
   return transitions[from].includes(to);
 }
+
+export function blocksGenericTransition(pendingDailyVisits: number, from: TicketStatus, to: TicketStatus) {
+  return pendingDailyVisits > 0 && from !== to;
+}

@@ -200,14 +200,15 @@ export class DailyTeamsService {
 
   async unassign(id: string, ticketId: string, principal: Principal) {
     this.assertHumanManager(principal);
-    const assignment = await this.prisma.dailyTeamTicket.findUnique({ where: { dailyTeamId_ticketId: { dailyTeamId: id, ticketId } }, include: { dailyTeam: true } });
-    if (!assignment) throw new NotFoundException('Asignación no encontrada.');
-    if (assignment.outcome !== DailyTicketOutcome.PENDING || assignment.startedAt) throw new ConflictException('Una visita iniciada o finalizada conserva su historial y no puede retirarse.');
-    await this.prisma.$transaction([
-      this.prisma.dailyTeamTicket.delete({ where: { id: assignment.id } }),
-      this.prisma.ticketEvent.create({ data: { ticketId, type: 'DAILY_TEAM_UNASSIGNED', actorId: principal.id, data: { teamId: id, teamName: assignment.dailyTeam.name, date: assignment.workDate.toISOString().slice(0, 10) } } }),
-    ]);
-    return { removed: true };
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockTicket(tx, ticketId);
+      const assignment = await tx.dailyTeamTicket.findUnique({ where: { dailyTeamId_ticketId: { dailyTeamId: id, ticketId } }, include: { dailyTeam: true } });
+      if (!assignment) throw new NotFoundException('Asignación no encontrada.');
+      if (assignment.outcome !== DailyTicketOutcome.PENDING || assignment.startedAt) throw new ConflictException('Una visita iniciada o finalizada conserva su historial y no puede retirarse.');
+      await tx.dailyTeamTicket.delete({ where: { id: assignment.id } });
+      await tx.ticketEvent.create({ data: { ticketId, type: 'DAILY_TEAM_UNASSIGNED', actorId: principal.id, data: { teamId: id, teamName: assignment.dailyTeam.name, date: assignment.workDate.toISOString().slice(0, 10) } } });
+      return { removed: true };
+    });
   }
 
   async remove(id: string, principal: Principal) {

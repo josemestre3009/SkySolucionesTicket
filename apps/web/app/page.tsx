@@ -206,7 +206,7 @@ export default function Home() {
       wispEnabled = result[1].enabled;
     }
     setUser(me);
-    if (me.role === "TECHNICIAN") setView("tickets");
+    if (me.role === "TECHNICIAN") setView("planning");
     setTickets(list);
     setCategories(cats);
     setAllReasons(reasonCatalog);
@@ -343,7 +343,7 @@ export default function Home() {
             }}
           />
         )}
-        {view === "planning" && user.role !== "TECHNICIAN" && <DailyPlanning user={user} refreshKey={planningRefresh} />}
+        {view === "planning" && <DailyPlanning user={user} refreshKey={planningRefresh} />}
         {view === "tickets" && (
           <div className={`tickets-layout ${selected ? "has-detail" : ""}`}>
             <TicketList
@@ -435,12 +435,12 @@ function Sidebar({
           active={view === "overview"}
           onClick={() => onView("overview")}
         />}
-        {user.role !== "TECHNICIAN" && <NavButton
+        <NavButton
           icon="clipboard"
-          label="Plan diario"
+          label={user.role === "TECHNICIAN" ? "Mi jornada" : "Plan diario"}
           active={view === "planning"}
           onClick={() => onView("planning")}
-        />}
+        />
         <NavButton
           icon="ticket"
           label={user.role === "TECHNICIAN" ? "Mis tareas" : "Tickets"}
@@ -709,6 +709,7 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
   const [category, setCategory] = useState("ALL");
   const [population, setPopulation] = useState("ALL");
   const [editor, setEditor] = useState<DailyTeam | "new" | null>(null);
+  const [outcomeEditor, setOutcomeEditor] = useState<{ teamId: string; ticket: Ticket; outcome: "DONE" | "NOT_DONE" } | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const canManage = user.role === "ADMIN" || user.role === "TEAM_LEADER";
@@ -754,6 +755,21 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
       await loadPlanning();
     } catch (caught) { setMessage((caught as Error).message); }
     finally { setBusy(false); }
+  }
+  async function startVisit(teamId: string, ticketId: string) {
+    setBusy(true);
+    try {
+      await api(`/daily-teams/${teamId}/tickets/${ticketId}/start`, { method: "POST" });
+      setMessage("Visita iniciada.");
+      await loadPlanning();
+    } catch (caught) { setMessage((caught as Error).message); }
+    finally { setBusy(false); }
+  }
+  function canExecute(team: DailyTeam, assignment: DailyTeamTicketAssignment) {
+    const isToday = assignment.workDate.slice(0, 10) === data?.today;
+    const allowed = user.role === "ADMIN" || user.role === "TEAM_LEADER" ||
+      (user.role === "TECHNICIAN" && team.members.some((member) => member.technician.id === user.id));
+    return isToday && allowed && assignment.outcome === "PENDING";
   }
   const teams = useMemo(() => data?.teams ?? [], [data]);
   const unplannedTickets = useMemo(() => data?.unplannedTickets ?? [], [data]);
@@ -904,6 +920,11 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
                   </div>
                   <div className="team-ticket-actions">
                     <StatusBadge status={ticket.status} />
+                    {canExecute(team, assignment) && <div className="execution-actions" role="group" aria-label={`Ejecución de TK-${ticket.number}`}>
+                      {!assignment.startedAt && <button type="button" disabled={busy} onClick={() => startVisit(team.id, ticket.id)}>Iniciar</button>}
+                      <button type="button" className="success" disabled={busy} onClick={() => setOutcomeEditor({ teamId: team.id, ticket, outcome: "DONE" })}>Realizado</button>
+                      <button type="button" className="danger" disabled={busy} onClick={() => setOutcomeEditor({ teamId: team.id, ticket, outcome: "NOT_DONE" })}>No se pudo</button>
+                    </div>}
                     {canManage && assignment.outcome === "PENDING" && <button disabled={busy} aria-label={`Retirar TK-${ticket.number} de ${team.name}`} onClick={() => unassign(team.id, ticket.id)}><Icon name="close" /></button>}
                   </div>
                 </div>;
@@ -929,6 +950,7 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
         </div>
       </div>}
       {editor && data && <DailyTeamEditor team={editor} date={date} technicians={data.technicians} occupiedIds={occupiedIds} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await loadPlanning(); }} />}
+      {outcomeEditor && data && <DailyOutcomeEditor teamId={outcomeEditor.teamId} ticket={outcomeEditor.ticket} initialOutcome={outcomeEditor.outcome} reasons={data.pendingReasons} onClose={() => setOutcomeEditor(null)} onSaved={async () => { setOutcomeEditor(null); await loadPlanning(); }} />}
       {message && <Toast message={message} close={() => setMessage("")} />}
     </div>
   );
@@ -975,6 +997,56 @@ function DailyTeamEditor({ team, date, technicians, occupiedIds, onClose, onSave
         <button className="primary-button" disabled={saving || !name.trim()} onClick={save}>{saving ? "Guardando..." : "Guardar cuadrilla"}</button>
       </footer>
     </section>
+  </div>;
+}
+
+function DailyOutcomeEditor({ teamId, ticket, initialOutcome, reasons, onClose, onSaved }: { teamId: string; ticket: Ticket; initialOutcome: "DONE" | "NOT_DONE"; reasons: Reason[]; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [outcome, setOutcome] = useState<"DONE" | "NOT_DONE">(initialOutcome);
+  const [note, setNote] = useState("");
+  const [reasonId, setReasonId] = useState("");
+  const [deferredTo, setDeferredTo] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const missingContext = outcome === "NOT_DONE" && !note.trim() && !reasonId;
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+  async function save(event: FormEvent) {
+    event.preventDefault();
+    if (missingContext) { setError("Indica un motivo o una nota."); return; }
+    setSaving(true); setError("");
+    try {
+      await api(`/daily-teams/${teamId}/tickets/${ticket.id}/outcome`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          outcome,
+          note: note.trim() || undefined,
+          pendingReasonId: outcome === "NOT_DONE" && reasonId ? reasonId : undefined,
+          deferredTo: outcome === "NOT_DONE" && deferredTo ? deferredTo : undefined,
+        }),
+      });
+      await onSaved();
+    } catch (caught) { setError((caught as Error).message); setSaving(false); }
+  }
+  return <div className="planning-sheet-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <form className="planning-sheet outcome-sheet" role="dialog" aria-modal="true" aria-labelledby="daily-outcome-title" onSubmit={save}>
+      <header>
+        <div><span className="eyebrow">TK-{ticket.number} · {ticket.customer.name}</span><h2 id="daily-outcome-title">Resultado de la visita</h2></div>
+        <button type="button" className="icon-button" aria-label="Cerrar" onClick={onClose}><Icon name="close" /></button>
+      </header>
+      <label className="field"><span>Resultado</span><select value={outcome} onChange={(event) => setOutcome(event.target.value as "DONE" | "NOT_DONE")}><option value="DONE">Realizado</option><option value="NOT_DONE">No se pudo</option></select></label>
+      {outcome === "NOT_DONE" && <label className="field"><span>Motivo</span><select value={reasonId} onChange={(event) => setReasonId(event.target.value)}><option value="">Sin motivo</option>{reasons.map((reason) => <option key={reason.id} value={reason.id}>{reason.name}</option>)}</select></label>}
+      <label className="field"><span>{outcome === "NOT_DONE" ? "Nota" : "Nota (opcional)"}</span><textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} placeholder={outcome === "NOT_DONE" ? "Describe qué ocurrió" : "Observaciones de la visita"} /></label>
+      {outcome === "NOT_DONE" && <label className="field"><span>Reprogramar para (opcional)</span><input type="date" value={deferredTo} onChange={(event) => setDeferredTo(event.target.value)} /></label>}
+      <p className="outcome-hint">Quedará registrado quién realizó la visita y los participantes de la cuadrilla.</p>
+      {error && <p className="form-error">{error}</p>}
+      <footer>
+        <button type="button" className="ghost-button" onClick={onClose}>Cancelar</button>
+        <button className="primary-button" disabled={saving || missingContext}>{saving ? "Guardando..." : "Guardar resultado"}</button>
+      </footer>
+    </form>
   </div>;
 }
 
@@ -1140,6 +1212,7 @@ function TicketDetail({
 }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [statusError, setStatusError] = useState("");
   async function assign(id: string) {
     setBusy(true);
     await api(`/tickets/${ticket.id}/assignment`, {
@@ -1152,10 +1225,12 @@ function TicketDetail({
   async function changeStatus(next: TicketStatus) {
     if (busy || next === ticket.status) return;
     setBusy(true);
+    setStatusError("");
     try {
       await api(`/tickets/${ticket.id}/status`, { method: "PATCH", body: JSON.stringify({ status: next }) });
       await onChanged();
-    } finally { setBusy(false); }
+    } catch (caught) { setStatusError((caught as Error).message); }
+    finally { setBusy(false); }
   }
   async function addNote(event: FormEvent) {
     event.preventDefault();
@@ -1340,6 +1415,7 @@ function TicketDetail({
           )}
         </section>
       </div>
+      {statusError && <Toast message={statusError} close={() => setStatusError("")} />}
     </section>
   );
 }

@@ -1,9 +1,9 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma, Role, TicketStatus } from '@prisma/client';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { DailyTicketOutcome, Prisma, Role, TicketStatus } from '@prisma/client';
 import { Principal } from '../../common/principal';
 import { PrismaService } from '../../infrastructure/prisma.service';
 import { currentPlanningWorkDate } from '../daily-teams/planning-date';
-import { canTransition } from './domain/ticket-workflow';
+import { blocksGenericTransition, canTransition } from './domain/ticket-workflow';
 import { AddNoteDto, AssignTicketDto, ChangeStatusDto, CreateTicketDto, UpdateTicketDto } from './tickets.dto';
 
 const include = { customer: true, category: true, assignedTo: { select: { id: true, name: true } }, pendingReason: true } as const;
@@ -69,11 +69,15 @@ export class TicketsService {
     });
   }
   async changeStatus(id: string, dto: ChangeStatusDto, p: Principal) {
-    const ticket = await this.get(id, p);
-    if (!canTransition(ticket.status, dto.status)) throw new BadRequestException(`Transición inválida: ${ticket.status} a ${dto.status}.`);
-    if (ticket.status === TicketStatus.RESOLVED && p.role === Role.TECHNICIAN) throw new ForbiddenException('Solo administración puede reabrir un ticket realizado.');
-    const data: Prisma.TicketUpdateInput = { status: dto.status, pendingReason: dto.pendingReasonId ? { connect: { id: dto.pendingReasonId } } : { disconnect: true }, pendingNote: dto.status === TicketStatus.PENDING ? dto.note ?? null : null, resolvedAt: dto.status === TicketStatus.RESOLVED ? new Date() : null };
+    await this.get(id, p);
     return this.prisma.$transaction(async (tx) => {
+      await tx.$queryRaw`SELECT "id" FROM "Ticket" WHERE "id" = ${id}::uuid FOR UPDATE`;
+      const ticket = await tx.ticket.findUniqueOrThrow({ where: { id } });
+      if (!canTransition(ticket.status, dto.status)) throw new BadRequestException(`Transición inválida: ${ticket.status} a ${dto.status}.`);
+      if (ticket.status === TicketStatus.RESOLVED && p.role === Role.TECHNICIAN) throw new ForbiddenException('Solo administración puede reabrir un ticket realizado.');
+      const pendingDailyVisits = await tx.dailyTeamTicket.count({ where: { ticketId: id, outcome: DailyTicketOutcome.PENDING } });
+      if (blocksGenericTransition(pendingDailyVisits, ticket.status, dto.status)) throw new ConflictException('Este ticket tiene una visita diaria pendiente; registre su resultado desde el plan diario.');
+      const data: Prisma.TicketUpdateInput = { status: dto.status, pendingReason: dto.pendingReasonId ? { connect: { id: dto.pendingReasonId } } : { disconnect: true }, pendingNote: dto.status === TicketStatus.PENDING ? dto.note ?? null : null, resolvedAt: dto.status === TicketStatus.RESOLVED ? new Date() : null };
       const updated = await tx.ticket.update({ where: { id }, data, include });
       await tx.ticketEvent.create({ data: { ticketId: id, type: 'STATUS_CHANGED', data: { from: ticket.status, to: dto.status, note: dto.note }, ...actorData(p) } });
       return updated;

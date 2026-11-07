@@ -4,6 +4,7 @@ import type { Principal } from '../src/common/principal';
 import type { PrismaService } from '../src/infrastructure/prisma.service';
 import { DailyTeamsService } from '../src/modules/daily-teams/daily-teams.service';
 import { currentPlanningWorkDate } from '../src/modules/daily-teams/planning-date';
+import { TicketsService } from '../src/modules/tickets/tickets.service';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
@@ -11,6 +12,7 @@ const suite = databaseUrl ? describe : describe.skip;
 suite('daily teams execution concurrency', () => {
   let prisma: PrismaClient;
   let service: DailyTeamsService;
+  let ticketsService: TicketsService;
   let admin: Principal;
   let technician: Principal;
   let customerId: string;
@@ -51,6 +53,7 @@ suite('daily teams execution concurrency', () => {
     prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
     await prisma.$connect();
     service = new DailyTeamsService(prisma as unknown as PrismaService);
+    ticketsService = new TicketsService(prisma as unknown as PrismaService);
     const adminUser = await prisma.user.create({
       data: { name: `Concurrency Admin ${suffix}`, email: `admin-${suffix}@test.local`, passwordHash: 'test', role: Role.ADMIN },
     });
@@ -84,6 +87,55 @@ suite('daily teams execution concurrency', () => {
     const second = await createTicket();
     await service.assign(todayTeamId, { ticketIds: [first.id, second.id] }, admin);
     expect(await prisma.dailyTeamTicket.count({ where: { dailyTeamId: todayTeamId, ticketId: { in: [first.id, second.id] } } })).toBe(2);
+  }, 30_000);
+
+  it('blocks generic status changes while a daily visit is pending', async () => {
+    const ticket = await createTicket();
+    await service.assign(todayTeamId, { ticketIds: [ticket.id] }, admin);
+    await expect(ticketsService.changeStatus(ticket.id, { status: TicketStatus.RESOLVED }, admin)).rejects.toThrow('plan diario');
+    expect((await prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } })).status).toBe(TicketStatus.PENDING);
+
+    await service.unassign(todayTeamId, ticket.id, admin);
+    await ticketsService.changeStatus(ticket.id, { status: TicketStatus.RESOLVED }, admin);
+    expect((await prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } })).status).toBe(TicketStatus.RESOLVED);
+  }, 30_000);
+
+  it('keeps generic status and daily outcome consistent under concurrency', async () => {
+    for (let index = 0; index < 12; index++) {
+      const ticket = await createTicket();
+      await service.assign(todayTeamId, { ticketIds: [ticket.id] }, admin);
+      const results = await Promise.allSettled([
+        ticketsService.changeStatus(ticket.id, { status: TicketStatus.RESOLVED }, admin),
+        service.updateOutcome(todayTeamId, ticket.id, { outcome: 'DONE' }, technician),
+      ]);
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect((await prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } })).status).toBe(TicketStatus.RESOLVED);
+      expect((await prisma.dailyTeamTicket.findUniqueOrThrow({
+        where: { dailyTeamId_ticketId: { dailyTeamId: todayTeamId, ticketId: ticket.id } },
+      })).outcome).toBe(DailyTicketOutcome.DONE);
+    }
+  }, 30_000);
+
+  it('never removes a visit that another request started during unassignment', async () => {
+    for (let index = 0; index < 20; index++) {
+      const ticket = await createTicket();
+      await service.assign(todayTeamId, { ticketIds: [ticket.id] }, admin);
+      const [unassignResult, startResult] = await Promise.allSettled([
+        service.unassign(todayTeamId, ticket.id, admin),
+        service.start(todayTeamId, ticket.id, technician),
+      ]);
+      const assignment = await prisma.dailyTeamTicket.findUnique({
+        where: { dailyTeamId_ticketId: { dailyTeamId: todayTeamId, ticketId: ticket.id } },
+      });
+      if (startResult.status === 'fulfilled') {
+        expect(unassignResult.status).toBe('rejected');
+        expect(assignment?.startedAt).toBeTruthy();
+        expect(assignment?.id).toBe(startResult.value.id);
+      } else {
+        expect(unassignResult.status).toBe('fulfilled');
+        expect(assignment).toBeNull();
+      }
+    }
   }, 30_000);
 
   it('never removes a visit that another request started during reassignment', async () => {
