@@ -1609,21 +1609,6 @@ function NewTicket({
               ))}
             </div>
             <div className="form-grid">
-              <Field
-                label="Asunto"
-                name="title"
-                required
-                wide
-                placeholder="Ej. Instalación de internet 10 MB"
-              />
-              <label className="field wide">
-                <span>Descripción</span>
-                <textarea
-                  name="description"
-                  rows={3}
-                  placeholder="Detalles que debe conocer el técnico"
-                />
-              </label>
               {category?.fields.map((field) => (
                 <Field
                   key={field}
@@ -1660,7 +1645,29 @@ function NewTicket({
           </fieldset>
           <fieldset>
             <legend>
-              <span>3</span>Asignación
+              <span>3</span>Asunto y descripción
+            </legend>
+            <div className="form-grid">
+              <Field
+                label="Asunto"
+                name="title"
+                required
+                wide
+                placeholder="Ej. Instalación de internet 10 MB"
+              />
+              <label className="field wide">
+                <span>Descripción</span>
+                <textarea
+                  name="description"
+                  rows={3}
+                  placeholder="Detalles que debe conocer el técnico"
+                />
+              </label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>
+              <span>4</span>Asignación
             </legend>
             <div className="form-grid">
               <label className="field">
