@@ -1608,18 +1608,6 @@ function NewTicket({
                 </button>
               ))}
             </div>
-            <div className="form-grid">
-              {category?.fields.map((field) => (
-                <Field
-                  key={field}
-                  label={humanize(field)}
-                  name={`field-${field}`}
-                  type={field === "contrato" || field === "mapa" ? "url" : "text"}
-                  required={category.code === "installation" && field === "contrato"}
-                  placeholder={field === "contrato" ? "https://..." : undefined}
-                />
-              ))}
-            </div>
           </fieldset>
           {wisphubEnabled && <section className="wisphub-lookup">
             <div className="wisphub-brand"><span>W</span><div>
@@ -1645,7 +1633,24 @@ function NewTicket({
           </fieldset>
           <fieldset>
             <legend>
-              <span>3</span>Asunto y descripción
+              <span>3</span>Datos adicionales del servicio
+            </legend>
+            <div className="form-grid">
+              {category?.fields.map((field) => (
+                <Field
+                  key={field}
+                  label={humanize(field)}
+                  name={`field-${field}`}
+                  type={field === "contrato" || field === "mapa" ? "url" : "text"}
+                  required={category.code === "installation" && field === "contrato"}
+                  placeholder={field === "contrato" ? "https://..." : undefined}
+                />
+              ))}
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>
+              <span>4</span>Asunto y descripción
             </legend>
             <div className="form-grid">
               <Field
@@ -1667,7 +1672,7 @@ function NewTicket({
           </fieldset>
           <fieldset>
             <legend>
-              <span>4</span>Asignación
+              <span>5</span>Asignación
             </legend>
             <div className="form-grid">
               <label className="field">
