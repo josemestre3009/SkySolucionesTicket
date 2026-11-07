@@ -3,7 +3,7 @@ import * as argon2 from 'argon2';
 import { createHash, randomBytes } from 'crypto';
 import { PrismaService } from '../../infrastructure/prisma.service';
 import { Principal } from '../../common/principal';
-import { CreateApiClientDto, CreateUserDto } from './users.dto';
+import { CreateApiClientDto, CreateUserDto, ResetPasswordDto } from './users.dto';
 
 @Injectable()
 export class UsersService {
@@ -20,6 +20,13 @@ export class UsersService {
     const found = await this.prisma.user.findUnique({ where: { id } });
     if (!found) throw new NotFoundException('Empleado no encontrado.');
     return this.prisma.user.update({ where: { id }, data: { active }, select: { id: true, name: true, email: true, role: true, phone: true, zone: true, active: true } });
+  }
+  async resetPassword(id: string, dto: ResetPasswordDto, principal: Principal) {
+    if (principal.kind !== 'user') throw new ForbiddenException('Solo un administrador humano puede restablecer contraseñas.');
+    if (id === principal.id) throw new ForbiddenException('Use el cambio de contraseña de su cuenta.');
+    const found = await this.prisma.user.findUnique({ where: { id } });
+    if (!found) throw new NotFoundException('Empleado no encontrado.');
+    return this.prisma.user.update({ where: { id }, data: { passwordHash: await argon2.hash(dto.newPassword) }, select: { id: true, name: true, email: true } });
   }
   agents() { return this.prisma.apiClient.findMany({ select: { id: true, name: true, keyPrefix: true, role: true, active: true, lastUsedAt: true, createdAt: true } }); }
   async createAgent(dto: CreateApiClientDto, creator: Principal) {

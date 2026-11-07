@@ -4,7 +4,7 @@ import { Response } from 'express';
 import { CurrentPrincipal } from '../../common/current-principal.decorator';
 import { Principal } from '../../common/principal';
 import { Public } from '../../common/public.decorator';
-import { LoginDto } from './auth.dto';
+import { ChangePasswordDto, LoginDto } from './auth.dto';
 import { AuthService } from './auth.service';
 
 @ApiTags('auth') @Controller('auth')
@@ -15,6 +15,7 @@ export class AuthController {
     response.cookie('access_token', result.accessToken, { httpOnly: true, sameSite: 'lax', secure: process.env.NODE_ENV === 'production', maxAge: 8 * 60 * 60 * 1000 });
     return result;
   }
+  @Post('change-password') changePassword(@Body() dto: ChangePasswordDto, @CurrentPrincipal() principal: Principal) { return this.auth.changePassword(principal, dto); }
   @Post('logout') logout(@Res({ passthrough: true }) response: Response) { response.clearCookie('access_token'); return { ok: true }; }
   @ApiBearerAuth() @Get('me') me(@CurrentPrincipal() principal: Principal) { return principal; }
 }

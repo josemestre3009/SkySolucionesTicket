@@ -3,7 +3,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
-RUN npm install
+RUN --mount=type=cache,id=sky-ticket-npm,target=/root/.npm npm ci --prefer-offline --no-audit --no-fund
 COPY apps/api apps/api
 RUN npm run prisma:generate --workspace=apps/api && npm run build --workspace=apps/api
 
