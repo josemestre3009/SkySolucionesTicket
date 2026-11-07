@@ -5,7 +5,7 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 COPY package.json package-lock.json* ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
-RUN npm install
+RUN --mount=type=cache,id=sky-ticket-npm,target=/root/.npm npm ci --prefer-offline --no-audit --no-fund
 COPY apps/web apps/web
 RUN npm run build --workspace=apps/web
 

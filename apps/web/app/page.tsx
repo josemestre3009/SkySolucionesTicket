@@ -165,6 +165,7 @@ export default function Home() {
   const [status, setStatus] = useState<TicketStatus | "ALL">("PENDING");
   const [newOpen, setNewOpen] = useState(false);
   const [employeeOpen, setEmployeeOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -314,6 +315,7 @@ export default function Home() {
           setView(next);
           setSelected(null);
         }}
+        onPassword={() => setPasswordOpen(true)}
         onLogout={logout}
       />
       <section className="workspace">
@@ -370,6 +372,7 @@ export default function Home() {
         )}
         {view === "config" && user.role === "ADMIN" && company && wisphub && (
           <Settings
+            currentUser={user}
             categories={categories}
             reasons={allReasons}
             company={company}
@@ -377,6 +380,7 @@ export default function Home() {
             users={users}
             tickets={tickets}
             onNewEmployee={() => setEmployeeOpen(true)}
+            onPassword={() => setPasswordOpen(true)}
             onChanged={load}
           />
         )}
@@ -403,6 +407,7 @@ export default function Home() {
           }}
         />
       )}
+      {passwordOpen && <ChangePassword onClose={() => setPasswordOpen(false)} />}
       {error && <Toast message={error} close={() => setError("")} />}
     </main>
   );
@@ -412,11 +417,13 @@ function Sidebar({
   user,
   view,
   onView,
+  onPassword,
   onLogout,
 }: {
   user: User;
   view: string;
   onView: (view: View) => void;
+  onPassword: () => void;
   onLogout: () => void;
 }) {
   return (
@@ -455,6 +462,12 @@ function Sidebar({
             onClick={() => onView("config")}
           />
         )}
+        {user.role !== "ADMIN" && <NavButton
+          icon="lock"
+          label="Contraseña"
+          active={false}
+          onClick={onPassword}
+        />}
       </nav>
       <div className="sidebar-help">
         <Icon name="spark" />
@@ -655,7 +668,7 @@ function Overview({
               <Empty
                 icon="users"
                 title="Sin técnicos"
-                text="Agrégalos desde usuarios mediante la API."
+                text="Agrégalos desde Configuración → Empleados."
               />
             )}
           </div>
@@ -1776,17 +1789,20 @@ function NewTicket({
 }
 
 function Employees({
+  currentUser,
   users,
   tickets,
   onNew,
   onChanged,
 }: {
+  currentUser: User;
   users: User[];
   tickets: Ticket[];
   onNew: () => void;
   onChanged: () => Promise<void>;
 }) {
   const [filter, setFilter] = useState<Role | "ALL">("ALL");
+  const [resetting, setResetting] = useState<User | null>(null);
   const visible = users.filter(
     (member) => filter === "ALL" || member.role === filter,
   );
@@ -1942,11 +1958,145 @@ function Employees({
                     ? "Activar empleado"
                     : "Desactivar acceso"}
                 </button>
+                {member.id !== currentUser.id && <button
+                  className="employee-toggle employee-reset"
+                  onClick={() => setResetting(member)}
+                >
+                  Restablecer contraseña
+                </button>}
               </article>
             );
           })}
         </div>
       </section>
+      {resetting && (
+        <ResetPassword
+          member={resetting}
+          onClose={() => setResetting(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function ChangePassword({ onClose }: { onClose: () => void }) {
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    const form = new FormData(event.currentTarget);
+    try {
+      await api("/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({
+          currentPassword: form.get("currentPassword"),
+          newPassword: form.get("newPassword"),
+        }),
+      });
+      setSaved(true);
+    } catch (caught) {
+      setError((caught as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+    >
+      <form className="modal pending-modal" onSubmit={submit}>
+        <div className="modal-heading">
+          <div>
+            <span className="eyebrow">Seguridad</span>
+            <h2>Cambiar mi contraseña</h2>
+            <p>Confirma tu contraseña actual antes de cambiarla.</p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Cerrar">
+            <Icon name="close" />
+          </button>
+        </div>
+        <label className="field">
+          <span>Contraseña actual *</span>
+          <input name="currentPassword" type="password" autoComplete="current-password" required />
+        </label>
+        <label className="field">
+          <span>Nueva contraseña *</span>
+          <input name="newPassword" type="password" autoComplete="new-password" minLength={8} required placeholder="Mínimo 8 caracteres" />
+        </label>
+        {saved && <p className="connection-success"><Icon name="check" />Contraseña actualizada.</p>}
+        {error && <p className="form-error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" className="ghost-button" onClick={onClose}>
+            {saved ? "Cerrar" : "Cancelar"}
+          </button>
+          <button className="primary-button" disabled={saving || saved}>
+            {saving ? "Guardando..." : "Cambiar contraseña"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function ResetPassword({ member, onClose }: { member: User; onClose: () => void }) {
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    const form = new FormData(event.currentTarget);
+    try {
+      await api(`/users/${member.id}/password`, {
+        method: "PATCH",
+        body: JSON.stringify({ newPassword: form.get("newPassword") }),
+      });
+      setSaved(true);
+    } catch (caught) {
+      setError((caught as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+    >
+      <form className="modal pending-modal" onSubmit={submit}>
+        <div className="modal-heading">
+          <div>
+            <span className="eyebrow">Administración</span>
+            <h2>Restablecer contraseña</h2>
+            <p>{member.name} recibirá una nueva contraseña temporal.</p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Cerrar">
+            <Icon name="close" />
+          </button>
+        </div>
+        <label className="field">
+          <span>Nueva contraseña *</span>
+          <input name="newPassword" type="password" autoComplete="new-password" minLength={8} required placeholder="Mínimo 8 caracteres" />
+        </label>
+        <p className="form-help">
+          Comparte la contraseña con la persona por un canal seguro.
+        </p>
+        {saved && <p className="connection-success"><Icon name="check" />Contraseña restablecida.</p>}
+        {error && <p className="form-error">{error}</p>}
+        <div className="modal-actions">
+          <button type="button" className="ghost-button" onClick={onClose}>
+            {saved ? "Cerrar" : "Cancelar"}
+          </button>
+          <button className="primary-button" disabled={saving || saved}>
+            {saving ? "Guardando..." : "Restablecer"}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
@@ -2082,6 +2232,7 @@ function NewEmployee({
 }
 
 function Settings({
+  currentUser,
   categories,
   reasons,
   company,
@@ -2089,8 +2240,10 @@ function Settings({
   users,
   tickets,
   onNewEmployee,
+  onPassword,
   onChanged,
 }: {
+  currentUser: User;
   categories: Category[];
   reasons: Reason[];
   company: CompanySettings;
@@ -2098,6 +2251,7 @@ function Settings({
   users: User[];
   tickets: Ticket[];
   onNewEmployee: () => void;
+  onPassword: () => void;
   onChanged: () => Promise<void>;
 }) {
   const [tab, setTab] = useState<
@@ -2296,14 +2450,15 @@ function Settings({
           >
             <Icon name="lock" />
             <span>
-              <strong>Permisos</strong>
-              <small>Qué puede hacer cada rol</small>
+              <strong>Seguridad</strong>
+              <small>Contraseña y permisos</small>
             </span>
           </button>
         </nav>
         <section className="settings-content">
           {tab === "employees" && (
             <Employees
+              currentUser={currentUser}
               users={users}
               tickets={tickets}
               onNew={onNewEmployee}
@@ -2620,12 +2775,22 @@ function Settings({
           )}
           {tab === "security" && (
             <>
+              <div className="security-password-card">
+                <div className="security-password-icon"><Icon name="lock" /></div>
+                <div className="security-password-copy">
+                  <span className="eyebrow">Tu cuenta</span>
+                  <h3>Contraseña</h3>
+                  <p>Actualiza tu clave de acceso de forma segura.</p>
+                </div>
+                <button className="primary-button" onClick={onPassword}>
+                  <Icon name="lock" /> Cambiar mi contraseña
+                </button>
+              </div>
               <div className="settings-section-head">
                 <div>
                   <h3>Permisos por rol</h3>
                   <p>
-                    Estos permisos se validan en la API. Ocultar botones no
-                    reemplaza la seguridad.
+                    Consulta las acciones disponibles para cada tipo de usuario.
                   </p>
                 </div>
               </div>

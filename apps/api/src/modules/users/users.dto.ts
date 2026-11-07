@@ -1,6 +1,7 @@
 import { Role } from '@prisma/client';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsBoolean, IsEmail, IsEnum, IsIn, IsOptional, IsString, MinLength } from 'class-validator';
+
 export class CreateUserDto {
   @ApiProperty() @IsString() @MinLength(2) name!: string;
   @ApiProperty() @IsEmail() email!: string;
@@ -14,3 +15,4 @@ export class CreateApiClientDto {
   @ApiProperty({ enum: [Role.ADMIN, Role.ASSISTANT] }) @IsIn([Role.ADMIN, Role.ASSISTANT]) role!: Role;
 }
 export class SetActiveDto { @ApiProperty() @IsBoolean() active!: boolean; }
+export class ResetPasswordDto { @ApiProperty() @IsString() @MinLength(8) newPassword!: string; }

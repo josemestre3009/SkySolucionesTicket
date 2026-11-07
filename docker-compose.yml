@@ -26,7 +26,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-this}
       WISPHUB_ENCRYPTION_KEY: ${WISPHUB_ENCRYPTION_KEY:-local-wisphub-encryption-key-change-this}
       PORT: 3001
-      WEB_ORIGIN: http://localhost:${WEB_PORT:-3000}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
       SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@skysoluciones.co}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-ChangeMe123!}
     depends_on:
