@@ -1588,122 +1588,9 @@ function NewTicket({
           </button>
         </div>
         <div className="form-scroll">
-          {wisphubEnabled && category?.code === "installation" && (
-            <section className="wisphub-lookup">
-              <div className="wisphub-brand">
-                <span>W</span>
-                <div>
-                  <strong>Seleccionar instalación de WispHub</strong>
-                  <small>
-                    Elige el cliente para completar sus datos automáticamente.
-                  </small>
-                </div>
-              </div>
-              <label className="field">
-                <span>Cliente</span>
-                <select
-                  defaultValue=""
-                  disabled={loadingClients}
-                  onFocus={loadWispClients}
-                  onChange={(event) => {
-                    const client = wispClients.find(
-                      (item) => String(item.serviceId) === event.target.value,
-                    );
-                    if (client) applyWispClient(client);
-                  }}
-                >
-                  <option value="">
-                    {loadingClients
-                      ? "Cargando clientes..."
-                      : "Seleccionar cliente"}
-                  </option>
-                  {wispClients.map((client) => (
-                    <option key={client.serviceId} value={client.serviceId}>
-                      {client.name} · {client.document || client.ip || "Sin documento"}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {foundClient && (
-                <div className="lookup-result">
-                  <Icon name="check" />
-                  <div>
-                    <strong>{foundClient.name}</strong>
-                    <span>
-                      {foundClient.plan || "Plan no informado"} · {foundClient.address}
-                    </span>
-                  </div>
-                </div>
-              )}
-            </section>
-          )}
-          {wisphubEnabled && category?.code !== "installation" && (
-            <section className="wisphub-lookup">
-              <div className="wisphub-brand">
-                <span>W</span>
-                <div>
-                  <strong>Buscar cliente en WispHub</strong>
-                  <small>
-                    Usa la IP asignada para completar los datos automáticamente.
-                  </small>
-                </div>
-              </div>
-              <div className="lookup-row">
-                <input
-                  value={lookupIp}
-                  onChange={(event) => setLookupIp(event.target.value)}
-                  placeholder="Ej. 10.20.14.87"
-                  inputMode="decimal"
-                />
-                <button
-                  type="button"
-                  disabled={lookingUp || !lookupIp.trim()}
-                  onClick={lookup}
-                >
-                  <Icon name="search" />
-                  {lookingUp ? "Buscando..." : "Consultar"}
-                </button>
-              </div>
-              {lookupError && <p className="form-error">{lookupError}</p>}
-              {foundClient && (
-                <div className="lookup-result">
-                  <Icon name="check" />
-                  <div>
-                    <strong>{foundClient.name}</strong>
-                    <span>
-                      {foundClient.plan || "Plan no informado"} ·{" "}
-                      {foundClient.status || "Estado no informado"}
-                    </span>
-                  </div>
-                  {foundClient.mapUrl && (
-                    <a
-                      href={foundClient.mapUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <Icon name="pin" />
-                      Ver ubicación
-                    </a>
-                  )}
-                </div>
-              )}
-            </section>
-          )}
           <fieldset>
             <legend>
-              <span>1</span>Cliente
-            </legend>
-            <div className="form-grid">
-              <Field label="Nombre completo" name="customerName" required />
-              <Field label="Teléfono" name="phone" type="tel" />
-              <Field label="Documento" name="document" />
-              <Field label="Población" name="population" />
-              <Field label="Dirección" name="address" wide />
-            </div>
-          </fieldset>
-          <fieldset>
-            <legend>
-              <span>2</span>Servicio
+              <span>1</span>¿Qué se va a realizar?
             </legend>
             <div className="category-picker">
               {categories.map((item) => (
@@ -1747,6 +1634,28 @@ function NewTicket({
                   placeholder={field === "contrato" ? "https://..." : undefined}
                 />
               ))}
+            </div>
+          </fieldset>
+          {wisphubEnabled && <section className="wisphub-lookup">
+            <div className="wisphub-brand"><span>W</span><div>
+              <strong>{category?.code === "installation" ? "Seleccionar instalación de WispHub" : "Buscar cliente en WispHub"}</strong>
+              <small>Opcional: completa automáticamente los datos del cliente.</small>
+            </div></div>
+            {category?.code === "installation" ? <label className="field"><span>Cliente</span><select defaultValue="" onFocus={loadWispClients} onChange={(event) => {
+              const client = wispClients.find((item) => String(item.serviceId) === event.target.value);
+              if (client) applyWispClient(client);
+            }}><option value="">{loadingClients ? "Cargando clientes..." : "Seleccionar cliente"}</option>{wispClients.map((client) => <option key={client.serviceId} value={client.serviceId}>{client.name} · {client.document || client.ip || "Sin documento"}</option>)}</select></label> : <div className="lookup-row"><input value={lookupIp} onChange={(event) => setLookupIp(event.target.value)} placeholder="IP del cliente" inputMode="decimal" /><button type="button" disabled={lookingUp || !lookupIp.trim()} onClick={lookup}><Icon name="search" />{lookingUp ? "Buscando..." : "Consultar"}</button></div>}
+            {lookupError && <p className="form-error">{lookupError}</p>}
+            {foundClient && <div className="lookup-result"><Icon name="check" /><div><strong>{foundClient.name}</strong><span>{foundClient.plan || "Plan no informado"} · {foundClient.address || foundClient.status || "Datos cargados"}</span></div>{foundClient.mapUrl && <a href={foundClient.mapUrl} target="_blank" rel="noreferrer"><Icon name="pin" />Ver ubicación</a>}</div>}
+          </section>}
+          <fieldset>
+            <legend><span>2</span>Datos del cliente</legend>
+            <div className="form-grid">
+              <Field label="Nombre completo" name="customerName" required />
+              <Field label="Teléfono" name="phone" type="tel" />
+              <Field label="Documento" name="document" />
+              <Field label="Población" name="population" />
+              <Field label="Dirección" name="address" wide />
             </div>
           </fieldset>
           <fieldset>
@@ -2954,7 +2863,6 @@ function Login({ onLogin }: { onLogin: () => Promise<void> }) {
             name="email"
             type="email"
             required
-            defaultValue="admin@skysoluciones.co"
           />
           <Field label="Contraseña" name="password" type="password" required />
           {error && <p className="form-error">{error}</p>}
