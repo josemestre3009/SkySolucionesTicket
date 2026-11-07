@@ -48,6 +48,8 @@ body{font-size:15px}.main-nav button{font-size:14px}.profile strong{font-size:14
 @media(max-width:800px){.detail-panel{height:auto}.detail-scroll{flex:1;min-height:0}.planning-header .primary-button{width:auto;min-width:max-content;padding:0 14px;font-size:12px}}
 .ticket-card-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 54px 14px 20px}.ticket-card-actions>a{height:34px;padding:0 10px;border:1px solid #b8d3e5;border-radius:9px;background:var(--sky);color:var(--navy);display:inline-flex;align-items:center;gap:6px;text-decoration:none;font-size:11px;font-weight:700}.ticket-card-actions>a svg{width:15px}.ticket-card-status{display:flex;gap:4px}.ticket-card-status button{height:34px;padding:0 9px;border:1px solid var(--line);border-radius:9px;background:#fff;color:var(--muted);font-size:10px;font-weight:700}.ticket-card-status button.active{border-color:var(--blue);background:var(--navy);color:#fff}.custom-field-button{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 10px;border-radius:9px;background:var(--navy-2);color:#fff;font-size:11px;font-weight:700;text-decoration:none}.custom-field-button svg{width:14px;height:14px}
 @media(max-width:800px){.ticket-card-actions{padding:0 56px 14px 18px}.ticket-card-status{width:100%}.ticket-card-status button{flex:1;min-width:0;padding:0 5px}.ticket-card-status button span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.contact-actions a{text-decoration:none}}
+.ticket-card-actions{align-items:stretch}.ticket-card-actions>a.ticket-work-map{width:100%;min-height:46px;justify-content:center;background:#dceefa;border-color:#a9cee5;color:var(--navy);font-size:13px}.ticket-work-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;width:100%}.ticket-work-actions button{min-height:46px;padding:8px 10px;border:1px solid transparent;border-radius:11px;display:flex;align-items:center;justify-content:center;gap:7px;font-size:12px;font-weight:800}.ticket-work-actions svg{width:16px}.ticket-work-actions .start{background:#e4f3eb;border-color:#bce0ce;color:#1f7556}.ticket-work-actions .done{background:#dceff1;border-color:#acd4d8;color:#17606a}.ticket-work-actions .failed{background:#f8e8e6;border-color:#eac4bf;color:#9d4038}.ticket-failure-backdrop{position:fixed;z-index:80;inset:0;display:grid;place-items:center;padding:20px;background:rgba(12,28,42,.48);backdrop-filter:blur(3px)}.ticket-failure-modal{width:min(460px,100%);padding:22px;border-radius:22px;background:#fff;box-shadow:0 24px 70px rgba(12,28,42,.28);display:grid;gap:13px}.ticket-failure-modal header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.ticket-failure-modal h3{font-size:21px}.ticket-failure-modal header p,.ticket-failure-modal small{color:var(--muted);font-size:12px}.ticket-failure-modal label{font-size:13px;font-weight:800}.ticket-failure-modal textarea{width:100%;min-height:118px;padding:12px 14px;border:1px solid #d9e0e4;border-radius:13px;background:#fbfcfc;resize:vertical}.ticket-failure-modal textarea:focus{outline:3px solid rgba(60,130,181,.25);border-color:var(--blue)}.ticket-failure-modal footer{display:flex;justify-content:flex-end;gap:9px}.ticket-failure-modal footer button{min-height:46px}
+@media(max-width:800px){.ticket-card-actions{padding-right:18px}.ticket-work-actions button{min-height:50px;font-size:13px}.ticket-failure-backdrop{place-items:end center;padding:0}.ticket-failure-modal{width:100%;padding:22px 20px calc(20px + env(safe-area-inset-bottom));border-radius:24px 24px 0 0}.ticket-failure-modal footer{display:grid;grid-template-columns:1fr 1fr}.ticket-failure-modal footer button{width:100%;min-height:50px}}
 .search-toggle{width:44px;height:44px;padding:0;border:1px solid var(--line);border-radius:13px;background:#fff;color:var(--navy);display:grid;place-items:center}.search-toggle.active{background:var(--sky);color:var(--blue)}.search-expanded{position:absolute;z-index:20;right:0;top:52px;width:min(330px,calc(100vw - 32px));box-shadow:var(--shadow)}.search-expanded button{width:34px;height:34px;padding:0;border:0;background:transparent;display:grid;place-items:center}.ticket-resource-actions{display:flex;gap:9px;flex-wrap:wrap;margin:14px 0}.resource-missing{display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 10px;border:1px dashed #c8d0d5;border-radius:9px;color:var(--muted);font-size:11px;font-weight:700}.resource-missing svg{width:14px}.planning-mobile-create{display:none}
 @media(min-width:801px){.tickets-layout:not(.has-detail){height:auto;display:block}.tickets-layout:not(.has-detail) .ticket-blank{display:none}.tickets-layout:not(.has-detail) .ticket-column{max-width:none}.tickets-layout:not(.has-detail) .ticket-cards{overflow:visible}.tickets-layout:not(.has-detail) .ticket-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start}}
 @media(max-width:800px){.top-actions{position:relative;display:flex;justify-content:flex-end}.search-expanded{position:fixed;left:16px;right:16px;top:92px;width:auto}.planning-mobile-create{display:flex;align-items:center;justify-content:center;gap:7px;width:100%;height:44px;margin:0 0 12px;border:0;border-radius:12px;background:var(--navy);color:#fff;font-weight:700}.planning-mobile-create svg{width:17px}}
@@ -81,9 +83,9 @@ body{font-size:15px}.main-nav button{font-size:14px}.profile strong{font-size:14
 .team-count{min-width:25px;padding:3px 7px;border-radius:20px;background:#eef3f6;color:var(--muted);font:700 11px 'DM Sans';text-align:center}
 .team-members{overflow-wrap:anywhere}
 .assign-selected{max-width:calc(100% - 24px)}
-.team-ticket{grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:10px}
-.team-ticket-main{display:grid;gap:2px;min-width:0}
-.team-ticket-actions{display:grid;justify-items:end;gap:6px;min-width:0}
+.team-ticket{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"main actions" "exec exec";align-items:start;gap:10px}
+.team-ticket-main{display:grid;gap:2px;min-width:0;grid-area:main}
+.team-ticket-actions{display:grid;justify-items:end;gap:6px;min-width:0;grid-area:actions}
 .team-ticket-actions select{width:118px;max-width:36vw;height:36px;border:1px solid var(--line);border-radius:10px;background:#fff;padding:0 6px;font-size:11px;font-weight:700;color:var(--navy)}
 .team-ticket-actions>button{width:36px;height:36px;border:0;border-radius:10px;background:#f5eeee;color:var(--red);display:grid;place-items:center}
 .team-ticket-actions>button svg{width:15px}
@@ -119,8 +121,11 @@ body{font-size:15px}.main-nav button{font-size:14px}.profile strong{font-size:14
 /* Daily execution result */
 .retry-note{color:#9a641e!important}
 .execution-context{color:#526574!important;line-height:1.35;white-space:normal!important}
-.execution-actions{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end}
-.execution-actions button{height:30px;padding:0 8px;border:1px solid var(--line);border-radius:8px;background:#fff;font-size:10px;font-weight:800;color:var(--navy)}
+.execution-actions{grid-area:exec;display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end}
+.execution-actions>button,.execution-actions>a{min-height:42px;padding:0 13px;border:1px solid var(--line);border-radius:10px;background:#fff;font-size:12px;font-weight:800;color:var(--navy);display:inline-flex;align-items:center;justify-content:center;gap:6px;text-align:center;text-decoration:none;white-space:nowrap}
+.execution-actions>button svg,.execution-actions>a svg{width:16px;height:16px;flex:none}
+.execution-actions>a.execution-map{background:var(--sky);border-color:#b8d3e5;color:var(--navy-2)}
+.execution-actions>button.execution-start{background:var(--navy);border-color:var(--navy);color:#fff}
 .execution-actions button.success{background:#e7f5ef;border-color:#cfe9de;color:#1f7a59}
 .execution-actions button.danger{background:#f8eded;border-color:#efd5d2;color:#a54a41}
 .execution-actions button:disabled{opacity:.55;cursor:wait}
@@ -136,6 +141,28 @@ body{font-size:15px}.main-nav button{font-size:14px}.profile strong{font-size:14
 .outcome-sheet .field{display:grid;gap:6px;margin-top:13px}
 .outcome-sheet .field textarea{border:1px solid var(--line);border-radius:12px;padding:10px 12px;resize:vertical;min-height:82px}
 .outcome-hint{font-size:11px;color:var(--muted);margin-top:12px;line-height:1.4}
-@media(max-width:480px){.execution-actions button{height:32px;font-size:10px}.team-ticket{grid-template-columns:1fr}.team-ticket-actions{justify-items:stretch}.execution-actions{justify-content:flex-start}}
+.outcome-warning{font-size:12px;color:#a54a41;margin-top:10px;line-height:1.4;font-weight:600}
+@media(max-width:1099px){
+  .planning-tabs{position:sticky;top:0;z-index:20;background:var(--canvas);padding:8px 0 10px;scroll-snap-type:x proximity;box-shadow:0 10px 16px -16px rgba(23,50,77,.7)}
+  .planning-tabs button{min-height:46px;padding:0 14px;font-size:13px;scroll-snap-align:start}
+}
+@media(max-width:800px){
+  .planning-page{padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right));padding-bottom:calc(118px + env(safe-area-inset-bottom))}
+  .planning-header{padding:6px 0 10px}
+  .planning-header h2{font-size:22px}
+  .planning-header .eyebrow{display:none}
+  .planning-date{padding:5px;gap:5px;border-radius:14px}
+  .planning-date>button{height:44px;border-radius:10px}
+  .planning-summary{padding:8px 1px;gap:6px}
+  .planning-summary span{padding:6px 9px;font-size:11px}
+  .planning-summary b{font-size:13px}
+  .team-ticket{grid-template-columns:minmax(0,1fr);grid-template-areas:"main" "actions" "exec";align-items:stretch;gap:8px}
+  .team-ticket-actions{justify-items:start}
+  .team-ticket-main strong,.team-ticket-main small{white-space:normal;overflow:visible;text-overflow:clip;line-height:1.4}
+  .execution-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));justify-content:stretch;gap:8px;width:100%}
+  .execution-actions>button,.execution-actions>a{width:100%;min-height:48px;padding:0 10px;font-size:13px;white-space:normal}
+  .execution-actions>a.execution-map,.execution-actions>button.execution-start{grid-column:1/-1}
+}
+@media(max-width:480px){.team-ticket-actions select{width:100%}}
 
 .employee-reset{margin-top:8px}

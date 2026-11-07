@@ -848,8 +848,8 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
       </div>
       {canManage && <button className="planning-mobile-create" onClick={() => setEditor("new")}><Icon name="plus" /> Crear cuadrilla</button>}
       <nav className="planning-tabs" aria-label="Cuadrillas del día">
-        {user.role !== "TECHNICIAN" && <button className={activeTeamId === "unplanned" ? "active" : ""} onClick={() => setActiveTab("unplanned")}>Sin planificar <b>{unplannedTickets.length}</b></button>}
-        {teams.map((team) => <button key={team.id} className={activeTeamId === team.id ? "active" : ""} onClick={() => setActiveTab(team.id)}>{team.name} <b>{team.tickets.length}</b></button>)}
+        {user.role !== "TECHNICIAN" && <button type="button" aria-current={activeTeamId === "unplanned" ? "true" : undefined} className={activeTeamId === "unplanned" ? "active" : ""} onClick={() => setActiveTab("unplanned")}>Sin planificar <b>{unplannedTickets.length}</b></button>}
+        {teams.map((team) => <button type="button" aria-current={activeTeamId === team.id ? "true" : undefined} key={team.id} className={activeTeamId === team.id ? "active" : ""} onClick={() => setActiveTab(team.id)}>{team.name} <b>{team.tickets.length}</b></button>)}
       </nav>
       <div className="planning-layout">
         {user.role !== "TECHNICIAN" && <section className={`planning-unplanned ${activeTeamId !== "unplanned" ? "mobile-hidden" : ""}`} aria-label="Tickets sin planificar">
@@ -917,6 +917,8 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
               {team.tickets.map((assignment) => {
                 const { ticket } = assignment;
                 const lastAttempt = ticket.dailyTeamAssignments?.[0];
+                const executable = canExecute(team, assignment);
+                const directions = mapHref(ticket);
                 return <div className="team-ticket" key={ticket.id}>
                   <div className="team-ticket-main">
                     <b>TK-{ticket.number} · {ticket.category.name}</b>
@@ -933,13 +935,17 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
                   </div>
                   <div className="team-ticket-actions">
                     <StatusBadge status={ticket.status} />
-                    {canExecute(team, assignment) && <div className="execution-actions" role="group" aria-label={`Ejecución de TK-${ticket.number}`}>
-                      {!assignment.startedAt && <button type="button" disabled={busy} onClick={() => startVisit(team.id, ticket.id)}>Iniciar</button>}
-                      <button type="button" className="success" disabled={busy} onClick={() => setOutcomeEditor({ teamId: team.id, ticket, outcome: "DONE" })}>Realizado</button>
-                      <button type="button" className="danger" disabled={busy} onClick={() => setOutcomeEditor({ teamId: team.id, ticket, outcome: "NOT_DONE" })}>No se pudo</button>
-                    </div>}
                     {canManage && assignment.outcome === "PENDING" && <button disabled={busy} aria-label={`Retirar TK-${ticket.number} de ${team.name}`} onClick={() => unassign(team.id, ticket.id)}><Icon name="close" /></button>}
                   </div>
+                  {executable && <div className="execution-actions" role="group" aria-label={`Acciones de TK-${ticket.number}`}>
+                    {directions && <a className="execution-map" href={directions} target="_blank" rel="noreferrer" aria-label={`Cómo llegar a TK-${ticket.number}`}><Icon name="pin" /><span>Cómo llegar</span></a>}
+                    {!assignment.startedAt
+                      ? <button type="button" className="execution-start" disabled={busy} onClick={() => startVisit(team.id, ticket.id)}><Icon name="play" /><span>Iniciar trabajo</span></button>
+                      : <>
+                        <button type="button" className="success" disabled={busy} onClick={() => setOutcomeEditor({ teamId: team.id, ticket, outcome: "DONE" })}><Icon name="check" /><span>Realizado</span></button>
+                        <button type="button" className="danger" disabled={busy} onClick={() => setOutcomeEditor({ teamId: team.id, ticket, outcome: "NOT_DONE" })}><Icon name="alert" /><span>No se pudo realizar</span></button>
+                      </>}
+                  </div>}
                 </div>;
               })}
               {!team.tickets.length && <p className="team-empty">Aún no tiene trabajos asignados.</p>}
@@ -1020,7 +1026,11 @@ function DailyOutcomeEditor({ teamId, ticket, initialOutcome, reasons, onClose, 
   const [deferredTo, setDeferredTo] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const missingContext = outcome === "NOT_DONE" && !note.trim() && !reasonId;
+  const trimmedNote = note.trim();
+  const noteTooShort = trimmedNote.length > 0 && trimmedNote.length < 3;
+  const missingContext = outcome === "NOT_DONE" && !trimmedNote && !reasonId;
+  const invalid = missingContext || noteTooShort;
+  const noteHelpId = "daily-outcome-note-help";
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
     window.addEventListener("keydown", closeOnEscape);
@@ -1028,14 +1038,15 @@ function DailyOutcomeEditor({ teamId, ticket, initialOutcome, reasons, onClose, 
   }, [onClose]);
   async function save(event: FormEvent) {
     event.preventDefault();
-    if (missingContext) { setError("Indica un motivo o una nota."); return; }
+    if (noteTooShort) { setError("La nota debe tener al menos 3 caracteres."); return; }
+    if (missingContext) { setError("Indica un motivo o describe qué ocurrió (mínimo 3 caracteres)."); return; }
     setSaving(true); setError("");
     try {
       await api(`/daily-teams/${teamId}/tickets/${ticket.id}/outcome`, {
         method: "PATCH",
         body: JSON.stringify({
           outcome,
-          note: note.trim() || undefined,
+          note: trimmedNote || undefined,
           pendingReasonId: outcome === "NOT_DONE" && reasonId ? reasonId : undefined,
           deferredTo: outcome === "NOT_DONE" && deferredTo ? deferredTo : undefined,
         }),
@@ -1051,13 +1062,18 @@ function DailyOutcomeEditor({ teamId, ticket, initialOutcome, reasons, onClose, 
       </header>
       <label className="field"><span>Resultado</span><select value={outcome} onChange={(event) => setOutcome(event.target.value as "DONE" | "NOT_DONE")}><option value="DONE">Realizado</option><option value="NOT_DONE">No se pudo</option></select></label>
       {outcome === "NOT_DONE" && <label className="field"><span>Motivo</span><select value={reasonId} onChange={(event) => setReasonId(event.target.value)}><option value="">Sin motivo</option>{reasons.map((reason) => <option key={reason.id} value={reason.id}>{reason.name}</option>)}</select></label>}
-      <label className="field"><span>{outcome === "NOT_DONE" ? "Nota" : "Nota (opcional)"}</span><textarea rows={3} value={note} onChange={(event) => setNote(event.target.value)} placeholder={outcome === "NOT_DONE" ? "Describe qué ocurrió" : "Observaciones de la visita"} /></label>
+      <label className="field"><span>{outcome === "NOT_DONE" ? "Nota" : "Nota (opcional)"}</span><textarea rows={3} minLength={3} maxLength={500} aria-invalid={invalid} aria-describedby={noteHelpId} value={note} onChange={(event) => setNote(event.target.value)} placeholder={outcome === "NOT_DONE" ? "Describe qué ocurrió" : "Observaciones de la visita"} /></label>
       {outcome === "NOT_DONE" && <label className="field"><span>Reprogramar para (opcional)</span><input type="date" value={deferredTo} onChange={(event) => setDeferredTo(event.target.value)} /></label>}
+      {noteTooShort
+        ? <p className="outcome-warning" id={noteHelpId} role="status">La nota debe tener al menos 3 caracteres.</p>
+        : missingContext
+          ? <p className="outcome-warning" id={noteHelpId} role="status">Indica un motivo o escribe al menos 3 caracteres explicando qué ocurrió.</p>
+          : <p className="outcome-hint" id={noteHelpId}>{outcome === "NOT_DONE" ? "Indica un motivo o escribe al menos 3 caracteres explicando qué ocurrió." : "Puedes añadir una observación de al menos 3 caracteres."}</p>}
       <p className="outcome-hint">Quedará registrado quién realizó la visita y los participantes de la cuadrilla.</p>
       {error && <p className="form-error">{error}</p>}
       <footer>
         <button type="button" className="ghost-button" onClick={onClose}>Cancelar</button>
-        <button className="primary-button" disabled={saving || missingContext}>{saving ? "Guardando..." : "Guardar resultado"}</button>
+        <button className="primary-button" disabled={saving || invalid}>{saving ? "Guardando..." : "Guardar resultado"}</button>
       </footer>
     </form>
   </div>;
@@ -1083,6 +1099,10 @@ function TicketList({
   const [copying, setCopying] = useState<string | null>(null);
   const [changing, setChanging] = useState<string | null>(null);
   const [copyMessage, setCopyMessage] = useState("");
+  const [failedTicket, setFailedTicket] = useState<string | null>(null);
+  const [failureNote, setFailureNote] = useState("");
+  const failureModalRef = useRef<HTMLElement>(null);
+  const failureTriggerRef = useRef<HTMLButtonElement | null>(null);
   async function copyTicket(id: string) {
     setCopying(id);
     try {
@@ -1116,11 +1136,42 @@ function TicketList({
     setChanging(ticket.id);
     try {
       await api(`/tickets/${ticket.id}/status`, { method: "PATCH", body: JSON.stringify({ status: next }) });
+      if (next === "IN_PROGRESS" && status === "PENDING") setStatus("IN_PROGRESS");
       await onChanged();
     } catch (caught) {
       setCopyMessage((caught as Error).message || "No se pudo cambiar el estado.");
     } finally { setChanging(null); }
   }
+  async function registerFailure(ticket: Ticket) {
+    const note = failureNote.trim();
+    if (note.length < 3 || changing) return;
+    setChanging(ticket.id);
+    try {
+      await api(`/tickets/${ticket.id}/status`, { method: "PATCH", body: JSON.stringify({ status: "PENDING", note }) });
+      setFailedTicket(null);
+      setFailureNote("");
+      await onChanged();
+    } catch (caught) {
+      setCopyMessage((caught as Error).message || "No se pudo registrar el motivo.");
+    } finally { setChanging(null); }
+  }
+  const failureTicket = tickets.find((ticket) => ticket.id === failedTicket);
+  useEffect(() => {
+    if (!failureTicket) return;
+    const close = () => { setFailedTicket(null); failureTriggerRef.current?.focus(); };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+      if (event.key !== "Tab" || !failureModalRef.current) return;
+      const controls = Array.from(failureModalRef.current.querySelectorAll<HTMLElement>('button, textarea, [href], input, select, [tabindex]:not([tabindex="-1"])'));
+      if (!controls.length) return;
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [failureTicket]);
   return (
     <section className="ticket-column">
       <div className="list-header">
@@ -1179,9 +1230,11 @@ function TicketList({
               </div>
             </button>
             <div className="ticket-card-actions">
-              {mapHref(ticket) && <a href={mapHref(ticket)!} target="_blank" rel="noreferrer"><Icon name="pin" /> Cómo llegar</a>}
-              {canChangeTicketStatus(user, ticket) && <div className="ticket-card-status" role="group" aria-label={`Estado de TK-${ticket.number}`}>
-                {(Object.keys(statusLabels) as TicketStatus[]).map((key) => <button key={key} type="button" className={ticket.status === key ? "active" : ""} aria-label={statusLabels[key]} title={statusLabels[key]} disabled={changing === ticket.id} onClick={() => changeStatus(ticket, key)}><span>{statusLabels[key]}</span></button>)}
+              {mapHref(ticket) && <a className="ticket-work-map" href={mapHref(ticket)!} target="_blank" rel="noreferrer"><Icon name="pin" /> Cómo llegar</a>}
+              {canChangeTicketStatus(user, ticket) && <div className="ticket-work-actions" role="group" aria-label={`Acciones de TK-${ticket.number}`}>
+                {ticket.status === "PENDING" && <button className="start" type="button" disabled={changing === ticket.id} onClick={() => changeStatus(ticket, "IN_PROGRESS")}><Icon name="play" /> Iniciar trabajo</button>}
+                {ticket.status === "IN_PROGRESS" && <button className="done" type="button" disabled={changing === ticket.id} onClick={() => changeStatus(ticket, "RESOLVED")}><Icon name="check" /> Realizado</button>}
+                {ticket.status === "IN_PROGRESS" && <button className="failed" type="button" disabled={changing === ticket.id} onClick={(event) => { failureTriggerRef.current = event.currentTarget; setFailedTicket(ticket.id); setFailureNote(""); }}><Icon name="close" /> No se pudo realizar</button>}
               </div>}
             </div>
             <button
@@ -1203,6 +1256,15 @@ function TicketList({
           />
         )}
       </div>
+      {failureTicket && <div className="ticket-failure-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setFailedTicket(null)}>
+        <section ref={failureModalRef} className="ticket-failure-modal" role="dialog" aria-modal="true" aria-labelledby="ticket-failure-title">
+          <header><div><span className="eyebrow">TK-{failureTicket.number}</span><h3 id="ticket-failure-title">No se pudo realizar</h3><p>{failureTicket.customer.name}</p></div><button type="button" className="icon-button" aria-label="Cerrar" onClick={() => setFailedTicket(null)}><Icon name="close" /></button></header>
+          <label htmlFor={`failure-${failureTicket.id}`}>Explica qué ocurrió</label>
+          <textarea id={`failure-${failureTicket.id}`} rows={4} minLength={3} maxLength={500} autoFocus value={failureNote} onChange={(event) => setFailureNote(event.target.value)} placeholder="Ej. Cliente ausente o sin acceso al lugar" />
+          <small>Mínimo 3 caracteres. La explicación quedará en el historial.</small>
+          <footer><button type="button" className="ghost-button" onClick={() => setFailedTicket(null)}>Cancelar</button><button type="button" className="primary-button" disabled={failureNote.trim().length < 3 || changing === failureTicket.id} onClick={() => registerFailure(failureTicket)}>{changing === failureTicket.id ? "Guardando..." : "Registrar motivo"}</button></footer>
+        </section>
+      </div>}
       {copyMessage && (
         <Toast message={copyMessage} close={() => setCopyMessage("")} />
       )}
@@ -1600,7 +1662,10 @@ function NewTicket({
                   key={item.id}
                   onClick={() => {
                     setCategoryId(item.id);
-                    if (foundClient) setGeneratedTitle(item.name, foundClient);
+                    const form = formRef.current;
+                    if (form) setFormValue(form, "title", foundClient
+                      ? [item.name, foundClient.population, foundClient.name].filter(Boolean).join(" - ")
+                      : item.name);
                   }}
                 >
                   <Icon name={categoryIcon(item.code)} />
@@ -1657,7 +1722,9 @@ function NewTicket({
                 label="Asunto"
                 name="title"
                 required
+                readOnly
                 wide
+                defaultValue={category?.name}
                 placeholder="Ej. Instalación de internet 10 MB"
               />
               <label className="field wide">
@@ -2897,6 +2964,7 @@ function Field({
   name,
   type = "text",
   required,
+  readOnly,
   wide,
   placeholder,
   defaultValue,
@@ -2905,6 +2973,7 @@ function Field({
   name: string;
   type?: string;
   required?: boolean;
+  readOnly?: boolean;
   wide?: boolean;
   placeholder?: string;
   defaultValue?: string;
@@ -2919,6 +2988,7 @@ function Field({
         name={name}
         type={type}
         required={required}
+        readOnly={readOnly}
         placeholder={placeholder}
         defaultValue={defaultValue}
       />
