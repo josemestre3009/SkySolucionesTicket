@@ -8,8 +8,8 @@ import { CreateApiClientDto, CreateUserDto, ResetPasswordDto } from './users.dto
 @Injectable()
 export class UsersService {
   constructor(private prisma: PrismaService) {}
-  list() { return this.prisma.user.findMany({ select: { id: true, name: true, email: true, role: true, phone: true, zone: true, active: true }, orderBy: { name: 'asc' } }); }
-  technicians() { return this.prisma.user.findMany({ where: { role: 'TECHNICIAN', active: true }, select: { id: true, name: true, role: true, zone: true, active: true }, orderBy: { name: 'asc' } }); }
+  list() { return this.prisma.user.findMany({ select: { id: true, name: true, email: true, role: true, phone: true, active: true }, orderBy: { name: 'asc' } }); }
+  technicians() { return this.prisma.user.findMany({ where: { role: 'TECHNICIAN', active: true }, select: { id: true, name: true, role: true, active: true }, orderBy: { name: 'asc' } }); }
   async create(dto: CreateUserDto) {
     const { password, ...data } = dto;
     try { return await this.prisma.user.create({ data: { ...data, email: dto.email.toLowerCase(), passwordHash: await argon2.hash(password) }, select: { id: true, name: true, email: true, role: true } }); }
@@ -19,7 +19,7 @@ export class UsersService {
     if (id === principal.id && !active) throw new ForbiddenException('No puede desactivar su propia cuenta.');
     const found = await this.prisma.user.findUnique({ where: { id } });
     if (!found) throw new NotFoundException('Empleado no encontrado.');
-    return this.prisma.user.update({ where: { id }, data: { active }, select: { id: true, name: true, email: true, role: true, phone: true, zone: true, active: true } });
+    return this.prisma.user.update({ where: { id }, data: { active }, select: { id: true, name: true, email: true, role: true, phone: true, active: true } });
   }
   async resetPassword(id: string, dto: ResetPasswordDto, principal: Principal) {
     if (principal.kind !== 'user') throw new ForbiddenException('Solo un administrador humano puede restablecer contraseñas.');

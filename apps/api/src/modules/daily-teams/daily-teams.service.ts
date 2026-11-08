@@ -40,7 +40,7 @@ export class DailyTeamsService {
       this.prisma.dailyTeam.findMany({
         where: { workDate, ...memberScope },
         include: {
-          members: { include: { technician: { select: { id: true, name: true, zone: true, active: true } } }, orderBy: { technician: { name: 'asc' } } },
+          members: { include: { technician: { select: { id: true, name: true, active: true } } }, orderBy: { technician: { name: 'asc' } } },
           tickets: { include: { ticket: { include: ticketInclude(workDate) }, ...resultInclude }, orderBy: { createdAt: 'asc' } },
         },
         orderBy: { name: 'asc' },
@@ -49,7 +49,7 @@ export class DailyTeamsService {
     ]);
     if (principal.role === Role.TECHNICIAN) return { date: dateText, today: currentPlanningWorkDate().toISOString().slice(0, 10), teams, technicians: [], unplannedTickets: [], pendingReasons };
     const [technicians, unplannedTickets] = await Promise.all([
-      this.prisma.user.findMany({ where: { role: Role.TECHNICIAN, active: true }, select: { id: true, name: true, zone: true, active: true }, orderBy: { name: 'asc' } }),
+      this.prisma.user.findMany({ where: { role: Role.TECHNICIAN, active: true }, select: { id: true, name: true, active: true }, orderBy: { name: 'asc' } }),
       this.prisma.ticket.findMany({
         where: { status: { not: TicketStatus.RESOLVED }, dailyTeamAssignments: { none: { workDate } } },
         include: ticketInclude(workDate),
