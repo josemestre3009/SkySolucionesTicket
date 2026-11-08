@@ -33,7 +33,6 @@ model User {
   passwordHash              String
   role                      Role
   phone                     String?
-  zone                      String?
   active                    Boolean                      @default(true)
   assigned                  Ticket[]                     @relation("AssignedTechnician")
   notes                     TicketNote[]

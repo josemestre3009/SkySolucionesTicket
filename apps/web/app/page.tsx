@@ -10,7 +10,6 @@ type User = {
   email?: string;
   role: Role;
   active?: boolean;
-  zone?: string;
   phone?: string;
 };
 type View = "overview" | "planning" | "tickets" | "config";
@@ -655,7 +654,6 @@ function Overview({
                   <Avatar name={technician.name} />
                   <span>
                     <strong>{technician.name}</strong>
-                    <small>{technician.zone || "Zona sin definir"}</small>
                   </span>
                   <b>
                     {tasks}
@@ -1008,7 +1006,7 @@ function DailyTeamEditor({ team, date, technicians, occupiedIds, onClose, onSave
       <label className="field"><span>Nombre</span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
       <div className="member-picker"><strong>Integrantes</strong>{technicians.map((technician) => {
         const occupied = occupiedIds.has(technician.id) && !currentIds.includes(technician.id);
-        return <label className={occupied ? "occupied" : ""} key={technician.id}><input type="checkbox" disabled={occupied} checked={members.includes(technician.id)} onChange={() => setMembers((current) => current.includes(technician.id) ? current.filter((id) => id !== technician.id) : [...current, technician.id])} /><Avatar name={technician.name} /><span><b>{technician.name}</b><small>{occupied ? "Ya está en otra cuadrilla" : technician.zone || "Sin zona"}</small></span></label>;
+        return <label className={occupied ? "occupied" : ""} key={technician.id}><input type="checkbox" disabled={occupied} checked={members.includes(technician.id)} onChange={() => setMembers((current) => current.includes(technician.id) ? current.filter((id) => id !== technician.id) : [...current, technician.id])} /><Avatar name={technician.name} /><span><b>{technician.name}</b><small>{occupied ? "Ya está en otra cuadrilla" : "Disponible"}</small></span></label>;
       })}</div>
       {error && <p className="form-error">{error}</p>}
       <footer>
@@ -1426,7 +1424,7 @@ function TicketDetail({
               </option>
               {technicians.map((technician) => (
                 <option key={technician.id} value={technician.id}>
-                  {technician.name} · {technician.zone || "Sin zona"}
+                  {technician.name}
                 </option>
               ))}
             </select>
@@ -1926,16 +1924,10 @@ function Employees({
                     <dd>{member.phone || "Sin teléfono"}</dd>
                   </div>
                   {member.role === "TECHNICIAN" && (
-                    <>
-                      <div>
-                        <dt>Zona</dt>
-                        <dd>{member.zone || "Sin zona asignada"}</dd>
-                      </div>
-                      <div>
-                        <dt>Trabajo actual</dt>
-                        <dd>{activeTasks} tickets activos</dd>
-                      </div>
-                    </>
+                    <div>
+                      <dt>Trabajo actual</dt>
+                      <dd>{activeTasks} tickets activos</dd>
+                    </div>
                   )}
                 </dl>
                 <button
@@ -2111,8 +2103,6 @@ function NewEmployee({
           email: form.get("email"),
           password: form.get("password"),
           phone: form.get("phone") || undefined,
-          zone:
-            role === "TECHNICIAN" ? form.get("zone") || undefined : undefined,
           role,
         }),
       });
@@ -2186,14 +2176,6 @@ function NewEmployee({
               required
             />
             <Field label="Teléfono" name="phone" type="tel" />
-            {role === "TECHNICIAN" && (
-              <Field
-                label="Zona de trabajo"
-                name="zone"
-                wide
-                placeholder="Ej. Río Seco · El Carmen"
-              />
-            )}
             <Field
               label="Contraseña temporal"
               name="password"
