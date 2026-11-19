@@ -5,6 +5,7 @@ import { PrismaService } from '../../infrastructure/prisma.service';
 import { AssignDailyTicketsDto, CreateDailyTeamDto, UpdateDailyTeamDto, UpdateDailyTicketOutcomeDto } from './daily-teams.dto';
 import { buildParticipantSnapshot, canTechnicianOperate, missingNotDoneContext } from './daily-execution';
 import { currentPlanningWorkDate, planningDate } from './planning-date';
+import { closeStaleVisits } from './stale-visits';
 
 const ticketBaseInclude = { customer: true, category: true, assignedTo: { select: { id: true, name: true } }, pendingReason: true } as const;
 const completionInclude = { select: { id: true, name: true } } as const;
@@ -35,6 +36,7 @@ export class DailyTeamsService {
 
   async planning(dateText: string, principal: Principal) {
     const workDate = planningDate(dateText);
+    await this.prisma.$transaction((tx) => closeStaleVisits(tx));
     const memberScope = principal.role === Role.TECHNICIAN ? { members: { some: { technicianId: principal.id } } } : {};
     const [teams, pendingReasons] = await Promise.all([
       this.prisma.dailyTeam.findMany({

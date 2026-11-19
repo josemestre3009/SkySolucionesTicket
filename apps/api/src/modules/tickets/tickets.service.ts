@@ -3,6 +3,7 @@ import { DailyTicketOutcome, Prisma, Role, TicketStatus } from '@prisma/client';
 import { Principal } from '../../common/principal';
 import { PrismaService } from '../../infrastructure/prisma.service';
 import { currentPlanningWorkDate } from '../daily-teams/planning-date';
+import { closeStaleVisits } from '../daily-teams/stale-visits';
 import { blocksGenericTransition, canTransition } from './domain/ticket-workflow';
 import { AddNoteDto, AssignTicketDto, ChangeStatusDto, CreateTicketDto, UpdateTicketDto } from './tickets.dto';
 
@@ -71,11 +72,12 @@ export class TicketsService {
   async changeStatus(id: string, dto: ChangeStatusDto, p: Principal) {
     await this.get(id, p);
     return this.prisma.$transaction(async (tx) => {
+      await closeStaleVisits(tx);
       await tx.$queryRaw`SELECT "id" FROM "Ticket" WHERE "id" = ${id}::uuid FOR UPDATE`;
       const ticket = await tx.ticket.findUniqueOrThrow({ where: { id } });
       if (!canTransition(ticket.status, dto.status)) throw new BadRequestException(`Transición inválida: ${ticket.status} a ${dto.status}.`);
       if (ticket.status === TicketStatus.RESOLVED && p.role === Role.TECHNICIAN) throw new ForbiddenException('Solo administración puede reabrir un ticket realizado.');
-      const pendingDailyVisits = await tx.dailyTeamTicket.count({ where: { ticketId: id, outcome: DailyTicketOutcome.PENDING } });
+      const pendingDailyVisits = await tx.dailyTeamTicket.count({ where: { ticketId: id, outcome: DailyTicketOutcome.PENDING, workDate: { gte: currentPlanningWorkDate() } } });
       if (blocksGenericTransition(pendingDailyVisits, ticket.status, dto.status)) throw new ConflictException('Este ticket tiene una visita diaria pendiente; registre su resultado desde el plan diario.');
       const data: Prisma.TicketUpdateInput = { status: dto.status, pendingReason: dto.pendingReasonId ? { connect: { id: dto.pendingReasonId } } : { disconnect: true }, pendingNote: dto.status === TicketStatus.PENDING ? dto.note ?? null : null, resolvedAt: dto.status === TicketStatus.RESOLVED ? new Date() : null };
       const updated = await tx.ticket.update({ where: { id }, data, include });
