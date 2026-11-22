@@ -7,7 +7,7 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/web/package.json apps/web/package.json
 RUN --mount=type=cache,id=sky-ticket-npm,target=/root/.npm npm ci --prefer-offline --no-audit --no-fund
 COPY apps/web apps/web
-RUN npm run build --workspace=apps/web
+RUN BUILD_ID=$(date +%s%N) && sed -i "s/__SKY_BUILD_ID__/$BUILD_ID/" apps/web/public/sw.js && npm run build --workspace=apps/web
 
 FROM node:22-alpine
 WORKDIR /app
