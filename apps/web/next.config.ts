@@ -1,6 +1,7 @@
 import type { NextConfig } from 'next';
 const nextConfig: NextConfig = {
   output: 'standalone',
+  experimental: { agentUpgrade: 'security' },
   async rewrites() {
     return [{ source: '/api/:path*', destination: 'http://api:3001/api/:path*' }];
   },

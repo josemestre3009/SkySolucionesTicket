@@ -18,6 +18,7 @@ suite('daily teams execution concurrency', () => {
   let customerId: string;
   let categoryId: string;
   let todayTeamId: string;
+  let reasonId: string;
   const ticketIds: string[] = [];
   const teamIds: string[] = [];
   const extraUserIds: string[] = [];
@@ -77,8 +78,10 @@ suite('daily teams execution concurrency', () => {
     technician = { id: technicianUser.id, name: technicianUser.name, role: technicianUser.role, kind: 'user' };
     const customer = await prisma.customer.create({ data: { name: `Concurrency Customer ${suffix}` } });
     const category = await prisma.ticketCategory.create({ data: { code: `test-${suffix}`, name: `Test ${suffix}`, fields: [] } });
+    const reason = await prisma.pendingReason.create({ data: { name: `Motivo ${suffix}` } });
     customerId = customer.id;
     categoryId = category.id;
+    reasonId = reason.id;
     const team = await createTeam(today, 'Today');
     todayTeamId = team.id;
   }, 30_000);
@@ -91,6 +94,7 @@ suite('daily teams execution concurrency', () => {
     await prisma.dailyTeam.deleteMany({ where: { id: { in: teamIds } } });
     if (customerId) await prisma.customer.delete({ where: { id: customerId } }).catch(() => undefined);
     if (categoryId) await prisma.ticketCategory.delete({ where: { id: categoryId } }).catch(() => undefined);
+    if (reasonId) await prisma.pendingReason.delete({ where: { id: reasonId } }).catch(() => undefined);
     await prisma.user.deleteMany({ where: { id: { in: [...extraUserIds, admin.id, technician.id] } } });
     await prisma.$disconnect();
   });
@@ -178,7 +182,7 @@ suite('daily teams execution concurrency', () => {
       await service.assign(todayTeamId, { ticketIds: [ticket.id] }, admin);
       const results = await Promise.allSettled([
         service.updateOutcome(todayTeamId, ticket.id, { outcome: 'DONE', note: 'Concurrent done' }, technician),
-        service.updateOutcome(todayTeamId, ticket.id, { outcome: 'NOT_DONE', note: 'Concurrent not done' }, admin),
+        service.updateOutcome(todayTeamId, ticket.id, { outcome: 'NOT_DONE', note: 'Concurrent not done', pendingReasonId: reasonId }, admin),
       ]);
       const fulfilled = results.filter((result) => result.status === 'fulfilled');
       expect(fulfilled).toHaveLength(1);
@@ -322,7 +326,7 @@ suite('daily teams execution concurrency', () => {
     const ticket = await createTicket();
     await service.assign(todayTeamId, { ticketIds: [ticket.id] }, admin);
     const deferredTo = tomorrow.toISOString().slice(0, 10);
-    const result = await service.updateOutcome(todayTeamId, ticket.id, { outcome: 'NOT_DONE', note: 'Cliente ausente', deferredTo }, technician);
+    const result = await service.updateOutcome(todayTeamId, ticket.id, { outcome: 'NOT_DONE', pendingReasonId: reasonId, deferredTo }, technician);
     expect(result.outcome).toBe(DailyTicketOutcome.NOT_DONE);
     expect(result.deferredTo?.toISOString().slice(0, 10)).toBe(deferredTo);
     const storedTicket = await prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } });

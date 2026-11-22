@@ -245,3 +245,15 @@ model DailyTeamTicketParticipant {
   @@index([dailyTeamTicketId])
   @@index([userId])
 }
+
+model OfflineOperation {
+  id         String   @id @db.Uuid
+  userId     String   @db.Uuid
+  kind       String
+  teamId     String   @db.Uuid
+  ticketId   String   @db.Uuid
+  response   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
