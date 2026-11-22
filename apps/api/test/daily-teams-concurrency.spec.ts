@@ -21,6 +21,7 @@ suite('daily teams execution concurrency', () => {
   let reasonId: string;
   const ticketIds: string[] = [];
   const teamIds: string[] = [];
+  const extraUserIds: string[] = [];
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const today = currentPlanningWorkDate();
   const tomorrow = new Date(today);
@@ -45,6 +46,18 @@ suite('daily teams execution concurrency', () => {
         createdById: admin.id,
         members: { create: { technicianId: user.id } },
       },
+    });
+    teamIds.push(team.id);
+    return team;
+  }
+
+  async function createTeamForNewTechnician(workDate: Date, name: string) {
+    const user = await prisma.user.create({
+      data: { name: `${name} Tech ${suffix}`, email: `${name.toLowerCase()}-${suffix}@test.local`, passwordHash: 'test', role: Role.TECHNICIAN },
+    });
+    extraUserIds.push(user.id);
+    const team = await prisma.dailyTeam.create({
+      data: { name: `${name} ${suffix}`, workDate, createdById: admin.id, members: { create: { technicianId: user.id } } },
     });
     teamIds.push(team.id);
     return team;
@@ -82,7 +95,7 @@ suite('daily teams execution concurrency', () => {
     if (customerId) await prisma.customer.delete({ where: { id: customerId } }).catch(() => undefined);
     if (categoryId) await prisma.ticketCategory.delete({ where: { id: categoryId } }).catch(() => undefined);
     if (reasonId) await prisma.pendingReason.delete({ where: { id: reasonId } }).catch(() => undefined);
-    await prisma.user.deleteMany({ where: { id: { in: [admin.id, technician.id] } } });
+    await prisma.user.deleteMany({ where: { id: { in: [...extraUserIds, admin.id, technician.id] } } });
     await prisma.$disconnect();
   });
 
@@ -200,6 +213,113 @@ suite('daily teams execution concurrency', () => {
     await service.assign(futureTeam.id, { ticketIds: [ticket.id] }, admin);
     await expect(service.updateOutcome(todayTeamId, ticket.id, { outcome: 'DONE' }, admin)).rejects.toThrow('planificación posterior');
     expect((await prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } })).status).toBe(TicketStatus.PENDING);
+  }, 30_000);
+
+  it('closes stale visits on first planning use, idempotently, and frees the ticket', async () => {
+    const todayText = today.toISOString().slice(0, 10);
+    const previousTeam = await createTeamForNewTechnician(yesterday, 'Stale');
+    const ticket = await createTicket();
+    const startedAt = new Date(yesterday);
+    startedAt.setUTCHours(14, 0, 0, 0);
+    await service.assign(previousTeam.id, { ticketIds: [ticket.id] }, admin);
+    await prisma.dailyTeamTicket.update({
+      where: { dailyTeamId_ticketId: { dailyTeamId: previousTeam.id, ticketId: ticket.id } },
+      data: { startedAt },
+    });
+    await prisma.ticket.update({ where: { id: ticket.id }, data: { status: TicketStatus.IN_PROGRESS } });
+
+    const plan = await service.planning(todayText, admin);
+    const stale = await prisma.dailyTeamTicket.findUniqueOrThrow({
+      where: { dailyTeamId_ticketId: { dailyTeamId: previousTeam.id, ticketId: ticket.id } },
+    });
+    expect(stale.outcome).toBe(DailyTicketOutcome.NOT_DONE);
+    expect(stale.outcomeNote).toBe('Cierre automático: sin resultado registrado al cierre de la jornada.');
+    expect(stale.completedAt).toBeTruthy();
+    expect(stale.startedAt).toEqual(startedAt);
+    expect(stale.dailyTeamId).toBe(previousTeam.id);
+    expect(stale.workDate).toEqual(yesterday);
+    expect(plan.unplannedTickets.some((item) => item.id === ticket.id)).toBe(true);
+    const freed = await prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } });
+    expect(freed.status).toBe(TicketStatus.PENDING);
+    expect(freed.pendingNote).toBe(stale.outcomeNote);
+
+    const firstCompletedAt = stale.completedAt;
+    await service.planning(todayText, admin);
+    expect((await prisma.dailyTeamTicket.findUniqueOrThrow({
+      where: { dailyTeamId_ticketId: { dailyTeamId: previousTeam.id, ticketId: ticket.id } },
+    })).completedAt).toEqual(firstCompletedAt);
+    expect(await prisma.ticketEvent.count({ where: { ticketId: ticket.id, type: 'DAILY_TICKET_AUTO_CLOSED' } })).toBe(1);
+
+    await service.assign(todayTeamId, { ticketIds: [ticket.id] }, admin);
+    expect(await prisma.dailyTeamTicket.count({ where: { ticketId: ticket.id, workDate: today, outcome: DailyTicketOutcome.PENDING } })).toBe(1);
+    expect(await prisma.ticketEvent.count({ where: { ticketId: ticket.id, type: 'DAILY_TICKET_AUTO_CLOSED' } })).toBe(1);
+  }, 30_000);
+
+  it('closes each stale visit once under concurrent planning calls', async () => {
+    const todayText = today.toISOString().slice(0, 10);
+    const previousTeam = await createTeamForNewTechnician(yesterday, 'RaceClose');
+    const ticket = await createTicket();
+    await service.assign(previousTeam.id, { ticketIds: [ticket.id] }, admin);
+
+    const results = await Promise.allSettled(Array.from({ length: 4 }, () => service.planning(todayText, admin)));
+
+    expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
+    expect((await prisma.dailyTeamTicket.findUniqueOrThrow({
+      where: { dailyTeamId_ticketId: { dailyTeamId: previousTeam.id, ticketId: ticket.id } },
+    })).outcome).toBe(DailyTicketOutcome.NOT_DONE);
+    expect(await prisma.ticketEvent.count({ where: { ticketId: ticket.id, type: 'DAILY_TICKET_AUTO_CLOSED' } })).toBe(1);
+  }, 30_000);
+
+  it('serializes stale closure with a concurrent generic status change', async () => {
+    const todayText = today.toISOString().slice(0, 10);
+    const previousTeam = await createTeamForNewTechnician(yesterday, 'RaceStatus');
+    const ticket = await createTicket();
+    await service.assign(previousTeam.id, { ticketIds: [ticket.id] }, admin);
+    await prisma.ticket.update({ where: { id: ticket.id }, data: { status: TicketStatus.IN_PROGRESS } });
+
+    const results = await Promise.allSettled([
+      service.planning(todayText, admin),
+      ticketsService.changeStatus(ticket.id, { status: TicketStatus.RESOLVED }, admin),
+    ]);
+
+    expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
+    expect((await prisma.dailyTeamTicket.findUniqueOrThrow({
+      where: { dailyTeamId_ticketId: { dailyTeamId: previousTeam.id, ticketId: ticket.id } },
+    })).outcome).toBe(DailyTicketOutcome.NOT_DONE);
+    expect((await prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } })).status).toBe(TicketStatus.RESOLVED);
+    expect(await prisma.ticketEvent.count({ where: { ticketId: ticket.id, type: 'DAILY_TICKET_AUTO_CLOSED' } })).toBe(1);
+  }, 30_000);
+
+  it('closes stale visits before a concurrent assignment to today crew', async () => {
+    const todayText = today.toISOString().slice(0, 10);
+    const previousTeam = await createTeamForNewTechnician(yesterday, 'RaceAssign');
+    const ticket = await createTicket();
+    await service.assign(previousTeam.id, { ticketIds: [ticket.id] }, admin);
+    await prisma.ticket.update({ where: { id: ticket.id }, data: { status: TicketStatus.IN_PROGRESS } });
+
+    const results = await Promise.allSettled([
+      service.planning(todayText, admin),
+      service.assign(todayTeamId, { ticketIds: [ticket.id] }, admin),
+    ]);
+
+    expect(results.every((result) => result.status === 'fulfilled')).toBe(true);
+    expect((await prisma.dailyTeamTicket.findUniqueOrThrow({
+      where: { dailyTeamId_ticketId: { dailyTeamId: previousTeam.id, ticketId: ticket.id } },
+    })).outcome).toBe(DailyTicketOutcome.NOT_DONE);
+    expect(await prisma.dailyTeamTicket.count({ where: { ticketId: ticket.id, workDate: today, outcome: DailyTicketOutcome.PENDING } })).toBe(1);
+    const freed = await prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } });
+    expect(freed.status).toBe(TicketStatus.PENDING);
+    expect(freed.pendingNote).toBe('Cierre automático: sin resultado registrado al cierre de la jornada.');
+    expect(await prisma.ticketEvent.count({ where: { ticketId: ticket.id, type: 'DAILY_TICKET_AUTO_CLOSED' } })).toBe(1);
+  }, 30_000);
+
+  it('does not let historical pending visits block generic status changes', async () => {
+    const previousTeam = await createTeamForNewTechnician(yesterday, 'Historical');
+    const ticket = await createTicket();
+    await service.assign(previousTeam.id, { ticketIds: [ticket.id] }, admin);
+
+    await ticketsService.changeStatus(ticket.id, { status: TicketStatus.RESOLVED }, admin);
+    expect((await prisma.ticket.findUniqueOrThrow({ where: { id: ticket.id } })).status).toBe(TicketStatus.RESOLVED);
   }, 30_000);
 
   it('keeps NOT_DONE reprogramming without creating a future squad assignment', async () => {
