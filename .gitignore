@@ -6,3 +6,5 @@ dist
 .DS_Store
 coverage
 apps/api/prisma/dev.db
+narrated-review/
+browser-validation-*/

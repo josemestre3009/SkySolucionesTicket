@@ -1,7 +1,9 @@
 "use client";
 
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "../lib/api";
+import { ApiError, api, checkHealth, isOfflineError, setOfflineUser } from "../lib/api";
+import { clearSession, deleteOperation, enqueueOperation, listOperations, markSessionExpired, operationId, saveSnapshot, updateOperation } from "../lib/offline";
+import { classifyOutboxFailure, summarizeOutbox } from "../lib/outbox";
 
 type Role = "ADMIN" | "ASSISTANT" | "TEAM_LEADER" | "TECHNICIAN";
 type User = {
@@ -54,6 +56,14 @@ type WispHubClient = {
 };
 type TicketStatus = "PENDING" | "IN_PROGRESS" | "RESOLVED";
 type DailyTicketOutcome = "PENDING" | "DONE" | "NOT_DONE";
+type OutcomePayload = {
+  outcome: "DONE" | "NOT_DONE";
+  note?: string;
+  pendingReasonId?: string;
+  deferredTo?: string;
+  clientOperationId: string;
+  executedAt: string;
+};
 type ExecutionParticipant = {
   id: string;
   userId?: string | null;
@@ -161,7 +171,7 @@ export default function Home() {
   const [selected, setSelected] = useState<Ticket | null>(null);
   const [view, setView] = useState<View>("overview");
   const [query, setQuery] = useState("");
-  const [status, setStatus] = useState<TicketStatus | "ALL">("PENDING");
+  const [status, setStatus] = useState<TicketStatus | "ALL">("ALL");
   const [newOpen, setNewOpen] = useState(false);
   const [employeeOpen, setEmployeeOpen] = useState(false);
   const [passwordOpen, setPasswordOpen] = useState(false);
@@ -171,15 +181,23 @@ export default function Home() {
   const [syncError, setSyncError] = useState(false);
   const [lastSync, setLastSync] = useState<number | null>(null);
   const [online, setOnline] = useState(true);
+  const [pendingOps, setPendingOps] = useState(0);
+  const [blockedOps, setBlockedOps] = useState(0);
+  const [blockedError, setBlockedError] = useState<string | null>(null);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [appUpdate, setAppUpdate] = useState<ServiceWorker | null>(null);
+  const [updatingApp, setUpdatingApp] = useState(false);
   const [planningRefresh, setPlanningRefresh] = useState(0);
   const selectedIdRef = useRef<string | null>(null);
   const syncInFlight = useRef(false);
+  const flushInFlight = useRef(false);
 
   async function load() {
-    const me = await api<User>("/auth/me");
+    const me = await api<User & { sessionExpired?: boolean }>("/auth/me");
+    setSessionExpired(Boolean(me.sessionExpired));
     const requests: [Promise<Ticket[]>, Promise<Category[]>] = [
-      api("/tickets"),
-      api("/categories"),
+      api<Ticket[]>("/tickets").catch(() => []),
+      api<Category[]>("/categories").catch(() => []),
     ];
     const [list, cats] = await Promise.all(requests);
     let team: User[] = [];
@@ -189,24 +207,26 @@ export default function Home() {
     let wispEnabled = false;
     if (me.role === "ADMIN") {
       [team, reasonCatalog, companySettings, wispSettings] = await Promise.all([
-        api<User[]>("/users"),
-        api<Reason[]>("/categories/pending-reasons/all"),
-        api<CompanySettings>("/categories/company/settings"),
-        api<WispHubSettings>("/integrations/wisphub/settings"),
+        api<User[]>("/users").catch(() => []),
+        api<Reason[]>("/categories/pending-reasons/all").catch(() => []),
+        api<CompanySettings>("/categories/company/settings").catch(() => null),
+        api<WispHubSettings>("/integrations/wisphub/settings").catch(() => null),
       ]);
-      wispEnabled = wispSettings.enabled && wispSettings.apiKeyConfigured;
+      wispEnabled = Boolean(wispSettings?.enabled && wispSettings.apiKeyConfigured);
     } else if (me.role === "ASSISTANT" || me.role === "TEAM_LEADER") {
       const result = await Promise.all([
-        api<User[]>("/technicians"),
+        api<User[]>("/technicians").catch(() => []),
         me.role === "ASSISTANT"
-          ? api<{ enabled: boolean }>("/integrations/wisphub/status")
+          ? api<{ enabled: boolean }>("/integrations/wisphub/status").catch(() => ({ enabled: false }))
           : Promise.resolve({ enabled: false }),
       ]);
       team = result[0];
       wispEnabled = result[1].enabled;
     }
     setUser(me);
-    if (me.role === "TECHNICIAN") setView("planning");
+    setOfflineUser(me.id);
+    await refreshOutboxState(me.id);
+    if (me.role === "TECHNICIAN") setView("tickets");
     setTickets(list);
     setCategories(cats);
     setAllReasons(reasonCatalog);
@@ -235,13 +255,62 @@ export default function Home() {
     // Session recovery is the only browser-side initialization.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     load().catch(() => setLoading(false));
+    // `load` intentionally runs once; later refreshes use the sync effects below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => { selectedIdRef.current = selected?.id ?? null; }, [selected?.id]);
+  async function refreshOutboxState(userId: string) {
+    const summary = summarizeOutbox(await listOperations(userId).catch(() => []));
+    setPendingOps(summary.pending);
+    setBlockedOps(summary.blocked);
+    setBlockedError(summary.lastError);
+    return summary;
+  }
+  async function syncOfflineQueue(current: User) {
+    if (flushInFlight.current || sessionExpired) return;
+    flushInFlight.current = true;
+    let synced = false;
+    try {
+      const queued = await listOperations(current.id);
+      for (const operation of queued) {
+        if (operation.status === "blocked") continue;
+        try {
+          await api(operation.path, { method: operation.method, body: operation.body });
+          await deleteOperation(operation.id);
+          synced = true;
+        } catch (caught) {
+          const status = caught instanceof ApiError ? caught.status : undefined;
+          if (status === 401) { setSessionExpired(true); await markSessionExpired().catch(() => undefined); break; }
+          if (classifyOutboxFailure({ offline: isOfflineError(caught), status }) === "pause") break;
+          // Permanent failure: keep the operation with its error so later, independent ones still sync.
+          await updateOperation({
+            ...operation,
+            status: "blocked",
+            attempts: (operation.attempts ?? 0) + 1,
+            lastError: caught instanceof Error ? caught.message : "Error de sincronización.",
+          }).catch(() => undefined);
+        }
+      }
+    } finally {
+      await refreshOutboxState(current.id);
+      flushInFlight.current = false;
+    }
+    if (synced) {
+      setLastSync(Date.now());
+      setSyncError(false);
+      setPlanningRefresh((value) => value + 1);
+    }
+  }
+
   async function silentRefresh() {
     if (!user || syncInFlight.current) return;
     syncInFlight.current = true;
     setSyncing(true);
     try {
+      const healthy = await checkHealth();
+      setOnline(healthy);
+      setSyncError(!healthy);
+      if (!healthy || sessionExpired) return;
       const list = await api<Ticket[]>("/tickets", { cache: "no-store" });
       setTickets(list);
       const id = selectedIdRef.current;
@@ -257,15 +326,25 @@ export default function Home() {
   }
   useEffect(() => {
     if (!user) return;
-    const refresh = () => { if (document.visibilityState === "visible" && navigator.onLine) void silentRefresh(); };
+    const refresh = () => {
+      if (document.visibilityState === "visible" && navigator.onLine) {
+        void syncOfflineQueue(user).then(() => silentRefresh());
+      } else if (!navigator.onLine) {
+        void refreshOutboxState(user.id);
+      }
+    };
     const onVisibility = () => { if (document.visibilityState === "visible") refresh(); };
     const onOnline = () => { setOnline(true); refresh(); };
-    const onOffline = () => setOnline(false);
+    const onOffline = () => {
+      setOnline(false);
+      void refreshOutboxState(user.id);
+    };
     const timer = window.setInterval(refresh, 30_000);
     window.addEventListener("focus", refresh);
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
     document.addEventListener("visibilitychange", onVisibility);
+    void syncOfflineQueue(user).then(() => silentRefresh());
     return () => {
       window.clearInterval(timer);
       window.removeEventListener("focus", refresh);
@@ -274,7 +353,75 @@ export default function Home() {
       document.removeEventListener("visibilitychange", onVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
+  }, [user?.id, sessionExpired]);
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    let registration: ServiceWorkerRegistration | null = null;
+    const findUpdate = () => {
+      if (!navigator.onLine) return;
+      void registration?.update().catch(() => undefined);
+    };
+    const watch = (worker: ServiceWorker | null) => {
+      if (!worker) return;
+      worker.addEventListener("statechange", () => {
+        if (worker.state === "installed" && navigator.serviceWorker.controller) setAppUpdate(worker);
+      });
+    };
+    const register = () => {
+      void navigator.serviceWorker.register("/sw.js").then((next) => {
+        registration = next;
+        if (next.waiting) setAppUpdate(next.waiting);
+        watch(next.installing);
+        next.addEventListener("updatefound", () => watch(next.installing));
+      }).catch(() => undefined);
+    };
+    const timer = window.setInterval(findUpdate, 60 * 60 * 1000);
+    window.addEventListener("online", findUpdate);
+    if (document.readyState === "complete") register();
+    else window.addEventListener("load", register);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("online", findUpdate);
+      window.removeEventListener("load", register);
+    };
+  }, []);
+
+  async function installAppUpdate() {
+    if (!appUpdate || !online || updatingApp || pendingOps > 0 || blockedOps > 0) return;
+    setUpdatingApp(true);
+    if (user) {
+      await syncOfflineQueue(user).catch(() => undefined);
+      const summary = await listOperations(user.id).then(summarizeOutbox).catch(() => null);
+      if (!summary) {
+        setUpdatingApp(false);
+        return;
+      }
+      setPendingOps(summary.pending);
+      setBlockedOps(summary.blocked);
+      setBlockedError(summary.lastError);
+      if (summary.pending > 0 || summary.blocked > 0) {
+        setUpdatingApp(false);
+        return;
+      }
+    }
+    navigator.serviceWorker.addEventListener("controllerchange", () => window.location.reload(), { once: true });
+    appUpdate.postMessage("SKIP_WAITING");
+  }
+  useEffect(() => {
+    if (!appUpdate || !online || updatingApp) return;
+    const updateWhenSafe = () => {
+      const editing = Boolean(document.querySelector('[role="dialog"], .modal-backdrop, .ticket-failure-backdrop'));
+      if (document.visibilityState === "visible" && !editing && !syncing && pendingOps === 0 && blockedOps === 0) void installAppUpdate();
+    };
+    const timer = window.setTimeout(updateWhenSafe, 1500);
+    const retry = window.setInterval(updateWhenSafe, 30_000);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearInterval(retry);
+    };
+    // installAppUpdate intentionally follows the current render state.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appUpdate, online, updatingApp, syncing, pendingOps, blockedOps]);
 
   if (loading)
     return (
@@ -301,7 +448,11 @@ export default function Home() {
   );
 
   async function logout() {
-    await api("/auth/logout", { method: "POST" });
+    // Signing out never touches the outbox: pending operations resume after the next login.
+    await api("/auth/logout", { method: "POST" }).catch(() => undefined);
+    setOfflineUser(null);
+    await clearSession().catch(() => undefined);
+    setSessionExpired(false);
     setUser(null);
   }
 
@@ -318,6 +469,18 @@ export default function Home() {
         onLogout={logout}
       />
       <section className="workspace">
+        {appUpdate && (
+          <div className="app-update" role="status">
+            <span><strong>Nueva versión disponible</strong><small>{!online ? "Podrás actualizar cuando recuperes conexión." : pendingOps > 0 || blockedOps > 0 ? "Se actualizará cuando terminen de sincronizarse tus cambios." : "Actualiza sin perder tu sesión ni datos guardados."}</small></span>
+            <button type="button" disabled={!online || updatingApp || pendingOps > 0 || blockedOps > 0} onClick={() => void installAppUpdate()}>{updatingApp ? "Actualizando…" : "Actualizar ahora"}</button>
+          </div>
+        )}
+        {sessionExpired && (
+          <div className="session-expired" role="alert">
+            <span>Tu sesión expiró. Puedes seguir consultando los datos guardados; las operaciones pendientes se sincronizarán al iniciar sesión de nuevo.</span>
+            <button className="text-button" onClick={() => void logout()}>Iniciar sesión</button>
+          </div>
+        )}
         <Topbar
           user={user}
           showSearch={view === "tickets"}
@@ -331,8 +494,12 @@ export default function Home() {
           syncing={syncing}
           syncError={syncError}
           online={online}
+          pending={pendingOps}
+          blocked={blockedOps}
+          blockedError={blockedError}
           lastSync={lastSync}
           onRefresh={() => void silentRefresh()}
+          onLogout={() => void logout()}
         />
         {view === "overview" && user.role !== "TECHNICIAN" && (
           <Overview
@@ -344,7 +511,7 @@ export default function Home() {
             }}
           />
         )}
-        {view === "planning" && <DailyPlanning user={user} refreshKey={planningRefresh} />}
+        {view === "planning" && <DailyPlanning user={user} refreshKey={planningRefresh} onQueueChanged={async () => { await refreshOutboxState(user.id); }} />}
         {view === "tickets" && (
           <div className={`tickets-layout ${selected ? "has-detail" : ""}`}>
             <TicketList
@@ -495,8 +662,12 @@ function Topbar({
   syncing,
   syncError,
   online,
+  pending,
+  blocked,
+  blockedError,
   lastSync,
   onRefresh,
+  onLogout,
 }: {
   user: User;
   showSearch: boolean;
@@ -507,10 +678,23 @@ function Topbar({
   syncing: boolean;
   syncError: boolean;
   online: boolean;
+  pending: number;
+  blocked: number;
+  blockedError: string | null;
   lastSync: number | null;
   onRefresh: () => void;
+  onLogout: () => void;
 }) {
   const [searchOpen, setSearchOpen] = useState(false);
+  const syncLabel = !online
+    ? pending ? `Sin conexión · ${pending} pendiente${pending === 1 ? "" : "s"}` : "Sin conexión"
+    : syncing
+      ? "Sincronizando"
+      : blocked
+        ? `${blocked} requiere${blocked === 1 ? "" : "n"} revisión`
+        : pending
+          ? `${pending} pendiente${pending === 1 ? "" : "s"}`
+          : syncError ? "Reintentar" : "Actualizar";
   return (
     <header className="topbar">
       <div>
@@ -520,7 +704,7 @@ function Topbar({
         <h1>¿Qué necesita atención hoy?</h1>
       </div>
       <div className="top-actions">
-        <button className={`sync-button ${!online || syncError ? "off" : ""}`} aria-label="Actualizar datos" title={!online ? "Sin conexión" : syncError ? "No se pudo actualizar" : lastSync ? `Actualizado ${new Date(lastSync).toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" })}` : "Actualizar"} disabled={syncing} onClick={onRefresh}><i /> <span>{!online ? "Sin conexión" : syncing ? "Actualizando" : syncError ? "Reintentar" : "Actualizar"}</span></button>
+        <button className={`sync-button ${!online || syncError || blocked ? "off" : ""} ${pending && !blocked ? "pending" : ""}`} aria-label="Actualizar datos" title={!online ? "Sin conexión" : syncing ? "Sincronizando cambios pendientes" : blocked ? blockedError ?? "Operaciones que requieren revisión" : pending ? `${pending} operación${pending === 1 ? "" : "es"} por sincronizar` : syncError ? "No se pudo actualizar" : lastSync ? `Actualizado ${new Date(lastSync).toLocaleTimeString("es-CO", { hour: "2-digit", minute: "2-digit" })}` : "Actualizar"} disabled={syncing} onClick={onRefresh}><i /> <span role="status" aria-live="polite">{syncLabel}</span></button>
         {showSearch && <button className={`search-toggle ${query ? "active" : ""}`} aria-label="Buscar tickets" aria-expanded={searchOpen} onClick={() => setSearchOpen((open) => !open)}><Icon name="search" /></button>}
         {showSearch && searchOpen && <label className="search search-expanded">
           <Icon name="search" />
@@ -538,6 +722,7 @@ function Topbar({
             Nuevo ticket
           </button>
         )}
+        <button className="mobile-logout" aria-label="Cerrar sesión" title="Cerrar sesión" onClick={onLogout}><Icon name="logout" /></button>
       </div>
     </header>
   );
@@ -711,7 +896,7 @@ function Overview({
   );
 }
 
-function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number }) {
+function DailyPlanning({ user, refreshKey, onQueueChanged }: { user: User; refreshKey: number; onQueueChanged: () => Promise<void> }) {
   const [date, setDate] = useState(todayValue());
   const [data, setData] = useState<DailyPlanningData | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
@@ -767,14 +952,78 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
     } catch (caught) { setMessage((caught as Error).message); }
     finally { setBusy(false); }
   }
+  // Keep the offline snapshot consistent with the optimistic UI so a remount stays truthful.
+  function commitPlanning(next: DailyPlanningData) {
+    setData(next);
+    void saveSnapshot(user.id, `/daily-planning?date=${date}`, next).catch(() => undefined);
+  }
+  function applyLocalStart(teamId: string, ticketId: string, executedAt: string) {
+    if (!data) return;
+    commitPlanning({
+      ...data,
+      teams: data.teams.map((team) => team.id !== teamId ? team : ({
+        ...team,
+        tickets: team.tickets.map((assignment) => assignment.ticket.id !== ticketId ? assignment : ({
+          ...assignment,
+          startedAt: executedAt,
+          ticket: { ...assignment.ticket, status: "IN_PROGRESS" as TicketStatus },
+        })),
+      })),
+    });
+  }
+  function applyLocalOutcome(teamId: string, ticketId: string, payload: OutcomePayload, executedAt: string) {
+    if (!data) return;
+    commitPlanning({
+      ...data,
+      teams: data.teams.map((team) => team.id !== teamId ? team : ({
+        ...team,
+        tickets: team.tickets.map((assignment) => {
+          if (assignment.ticket.id !== ticketId) return assignment;
+          const reason = payload.outcome === "NOT_DONE" ? data.pendingReasons.find((item) => item.id === payload.pendingReasonId) ?? null : null;
+          return {
+            ...assignment,
+            outcome: payload.outcome,
+            outcomeNote: payload.note ?? null,
+            pendingReason: reason,
+            deferredTo: payload.deferredTo ?? null,
+            completedAt: executedAt,
+            ticket: {
+              ...assignment.ticket,
+              status: payload.outcome === "DONE" ? "RESOLVED" as TicketStatus : "PENDING" as TicketStatus,
+              resolvedAt: payload.outcome === "DONE" ? executedAt : undefined,
+              pendingReason: reason ?? undefined,
+              pendingNote: payload.note,
+            },
+          };
+        }),
+      })),
+    });
+  }
   async function startVisit(teamId: string, ticketId: string) {
     setBusy(true);
+    const clientOperationId = operationId();
+    const executedAt = new Date().toISOString();
+    const path = `/daily-teams/${teamId}/tickets/${ticketId}/start`;
     try {
-      await api(`/daily-teams/${teamId}/tickets/${ticketId}/start`, { method: "POST" });
+      await api(path, { method: "POST", body: JSON.stringify({ clientOperationId, executedAt }) });
       setMessage("Visita iniciada.");
       await loadPlanning();
-    } catch (caught) { setMessage((caught as Error).message); }
+    } catch (caught) {
+      if (isOfflineError(caught)) {
+        await enqueueOperation({ id: clientOperationId, userId: user.id, kind: "DAILY_START", label: "Iniciar visita", method: "POST", path, body: JSON.stringify({ clientOperationId, executedAt }), createdAt: Date.now() });
+        applyLocalStart(teamId, ticketId, executedAt);
+        await onQueueChanged();
+        setMessage("Visita iniciada sin conexión. Se sincronizará automáticamente.");
+      } else { setMessage((caught as Error).message); }
+    }
     finally { setBusy(false); }
+  }
+  async function queueOutcome(teamId: string, ticketId: string, payload: OutcomePayload) {
+    const path = `/daily-teams/${teamId}/tickets/${ticketId}/outcome`;
+    // The same clientOperationId already sent online is reused here, so a lost response replays instead of duplicating.
+    await enqueueOperation({ id: payload.clientOperationId, userId: user.id, kind: "DAILY_OUTCOME", label: "Resultado de visita", method: "PATCH", path, body: JSON.stringify(payload), createdAt: Date.now(), status: "pending", attempts: 0 });
+    applyLocalOutcome(teamId, ticketId, payload, payload.executedAt);
+    await onQueueChanged();
   }
   function canExecute(team: DailyTeam, assignment: DailyTeamTicketAssignment) {
     const isToday = assignment.workDate.slice(0, 10) === data?.today;
@@ -917,6 +1166,7 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
                 const lastAttempt = ticket.dailyTeamAssignments?.[0];
                 const executable = canExecute(team, assignment);
                 const directions = mapHref(ticket);
+                const contract = externalHref(ticket.customFields?.contrato);
                 return <div className="team-ticket" key={ticket.id}>
                   <div className="team-ticket-main">
                     <b>TK-{ticket.number} · {ticket.category.name}</b>
@@ -936,10 +1186,11 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
                     {canManage && assignment.outcome === "PENDING" && <button disabled={busy} aria-label={`Retirar TK-${ticket.number} de ${team.name}`} onClick={() => unassign(team.id, ticket.id)}><Icon name="close" /></button>}
                   </div>
                   {executable && <div className="execution-actions" role="group" aria-label={`Acciones de TK-${ticket.number}`}>
-                    {directions && <a className="execution-map" href={directions} target="_blank" rel="noreferrer" aria-label={`Cómo llegar a TK-${ticket.number}`}><Icon name="pin" /><span>Cómo llegar</span></a>}
+                    {!assignment.startedAt && directions && <a className="execution-map" href={directions} target="_blank" rel="noreferrer" aria-label={`Cómo llegar a TK-${ticket.number}`}><Icon name="pin" /><span>Cómo llegar</span></a>}
                     {!assignment.startedAt
                       ? <button type="button" className="execution-start" disabled={busy} onClick={() => startVisit(team.id, ticket.id)}><Icon name="play" /><span>Iniciar trabajo</span></button>
                       : <>
+                        {contract && <a className="execution-map" href={contract} target="_blank" rel="noreferrer" aria-label={`Firmar contrato de TK-${ticket.number}`}><Icon name="link" /><span>Firmar contrato</span></a>}
                         <button type="button" className="success" disabled={busy} onClick={() => setOutcomeEditor({ teamId: team.id, ticket, outcome: "DONE" })}><Icon name="check" /><span>Realizado</span></button>
                         <button type="button" className="danger" disabled={busy} onClick={() => setOutcomeEditor({ teamId: team.id, ticket, outcome: "NOT_DONE" })}><Icon name="alert" /><span>No se pudo realizar</span></button>
                       </>}
@@ -967,7 +1218,7 @@ function DailyPlanning({ user, refreshKey }: { user: User; refreshKey: number })
         </div>
       </div>}
       {editor && data && <DailyTeamEditor team={editor} date={date} technicians={data.technicians} occupiedIds={occupiedIds} onClose={() => setEditor(null)} onSaved={async () => { setEditor(null); await loadPlanning(); }} />}
-      {outcomeEditor && data && <DailyOutcomeEditor teamId={outcomeEditor.teamId} ticket={outcomeEditor.ticket} initialOutcome={outcomeEditor.outcome} reasons={data.pendingReasons} onClose={() => setOutcomeEditor(null)} onSaved={async () => { setOutcomeEditor(null); await loadPlanning(); }} />}
+      {outcomeEditor && data && <DailyOutcomeEditor teamId={outcomeEditor.teamId} ticket={outcomeEditor.ticket} initialOutcome={outcomeEditor.outcome} reasons={data.pendingReasons} onClose={() => setOutcomeEditor(null)} onOfflineSave={(payload) => queueOutcome(outcomeEditor.teamId, outcomeEditor.ticket.id, payload)} onSaved={async () => { setOutcomeEditor(null); if (navigator.onLine) await loadPlanning().catch(() => undefined); }} />}
       {message && <Toast message={message} close={() => setMessage("")} />}
     </div>
   );
@@ -1017,7 +1268,7 @@ function DailyTeamEditor({ team, date, technicians, occupiedIds, onClose, onSave
   </div>;
 }
 
-function DailyOutcomeEditor({ teamId, ticket, initialOutcome, reasons, onClose, onSaved }: { teamId: string; ticket: Ticket; initialOutcome: "DONE" | "NOT_DONE"; reasons: Reason[]; onClose: () => void; onSaved: () => Promise<void> }) {
+function DailyOutcomeEditor({ teamId, ticket, initialOutcome, reasons, onClose, onSaved, onOfflineSave }: { teamId: string; ticket: Ticket; initialOutcome: "DONE" | "NOT_DONE"; reasons: Reason[]; onClose: () => void; onSaved: () => Promise<void>; onOfflineSave: (payload: OutcomePayload) => Promise<void> }) {
   const [outcome, setOutcome] = useState<"DONE" | "NOT_DONE">(initialOutcome);
   const [note, setNote] = useState("");
   const [reasonId, setReasonId] = useState("");
@@ -1026,7 +1277,7 @@ function DailyOutcomeEditor({ teamId, ticket, initialOutcome, reasons, onClose, 
   const [error, setError] = useState("");
   const trimmedNote = note.trim();
   const noteTooShort = trimmedNote.length > 0 && trimmedNote.length < 3;
-  const missingContext = outcome === "NOT_DONE" && !trimmedNote && !reasonId;
+  const missingContext = outcome === "NOT_DONE" && !reasonId;
   const invalid = missingContext || noteTooShort;
   const noteHelpId = "daily-outcome-note-help";
   useEffect(() => {
@@ -1037,18 +1288,27 @@ function DailyOutcomeEditor({ teamId, ticket, initialOutcome, reasons, onClose, 
   async function save(event: FormEvent) {
     event.preventDefault();
     if (noteTooShort) { setError("La nota debe tener al menos 3 caracteres."); return; }
-    if (missingContext) { setError("Indica un motivo o describe qué ocurrió (mínimo 3 caracteres)."); return; }
+    if (missingContext) { setError("Selecciona el motivo por el que no se realizó la visita."); return; }
     setSaving(true); setError("");
+    // Generate the operation identity once so an offline retry after a lost response stays idempotent.
+    const payload: OutcomePayload = {
+      outcome,
+      note: trimmedNote || undefined,
+      pendingReasonId: outcome === "NOT_DONE" ? reasonId : undefined,
+      deferredTo: outcome === "NOT_DONE" && deferredTo ? deferredTo : undefined,
+      clientOperationId: operationId(),
+      executedAt: new Date().toISOString(),
+    };
     try {
-      await api(`/daily-teams/${teamId}/tickets/${ticket.id}/outcome`, {
-        method: "PATCH",
-        body: JSON.stringify({
-          outcome,
-          note: trimmedNote || undefined,
-          pendingReasonId: outcome === "NOT_DONE" && reasonId ? reasonId : undefined,
-          deferredTo: outcome === "NOT_DONE" && deferredTo ? deferredTo : undefined,
-        }),
-      });
+      try {
+        await api(`/daily-teams/${teamId}/tickets/${ticket.id}/outcome`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
+      } catch (caught) {
+        if (!isOfflineError(caught)) throw caught;
+        await onOfflineSave(payload);
+      }
       await onSaved();
     } catch (caught) { setError((caught as Error).message); setSaving(false); }
   }
@@ -1059,14 +1319,14 @@ function DailyOutcomeEditor({ teamId, ticket, initialOutcome, reasons, onClose, 
         <button type="button" className="icon-button" aria-label="Cerrar" onClick={onClose}><Icon name="close" /></button>
       </header>
       <label className="field"><span>Resultado</span><select value={outcome} onChange={(event) => setOutcome(event.target.value as "DONE" | "NOT_DONE")}><option value="DONE">Realizado</option><option value="NOT_DONE">No se pudo</option></select></label>
-      {outcome === "NOT_DONE" && <label className="field"><span>Motivo</span><select value={reasonId} onChange={(event) => setReasonId(event.target.value)}><option value="">Sin motivo</option>{reasons.map((reason) => <option key={reason.id} value={reason.id}>{reason.name}</option>)}</select></label>}
-      <label className="field"><span>{outcome === "NOT_DONE" ? "Nota" : "Nota (opcional)"}</span><textarea rows={3} minLength={3} maxLength={500} aria-invalid={invalid} aria-describedby={noteHelpId} value={note} onChange={(event) => setNote(event.target.value)} placeholder={outcome === "NOT_DONE" ? "Describe qué ocurrió" : "Observaciones de la visita"} /></label>
+      {outcome === "NOT_DONE" && <label className="field"><span>Motivo</span><select required value={reasonId} onChange={(event) => setReasonId(event.target.value)}><option value="">Selecciona un motivo</option>{reasons.map((reason) => <option key={reason.id} value={reason.id}>{reason.name}</option>)}</select></label>}
+      <label className="field"><span>Nota (opcional)</span><textarea rows={3} minLength={3} maxLength={500} aria-invalid={invalid} aria-describedby={noteHelpId} value={note} onChange={(event) => setNote(event.target.value)} placeholder={outcome === "NOT_DONE" ? "Describe qué ocurrió" : "Observaciones de la visita"} /></label>
       {outcome === "NOT_DONE" && <label className="field"><span>Reprogramar para (opcional)</span><input type="date" value={deferredTo} onChange={(event) => setDeferredTo(event.target.value)} /></label>}
       {noteTooShort
         ? <p className="outcome-warning" id={noteHelpId} role="status">La nota debe tener al menos 3 caracteres.</p>
         : missingContext
-          ? <p className="outcome-warning" id={noteHelpId} role="status">Indica un motivo o escribe al menos 3 caracteres explicando qué ocurrió.</p>
-          : <p className="outcome-hint" id={noteHelpId}>{outcome === "NOT_DONE" ? "Indica un motivo o escribe al menos 3 caracteres explicando qué ocurrió." : "Puedes añadir una observación de al menos 3 caracteres."}</p>}
+          ? <p className="outcome-warning" id={noteHelpId} role="status">Selecciona el motivo por el que no se realizó la visita.</p>
+          : <p className="outcome-hint" id={noteHelpId}>{outcome === "NOT_DONE" ? "El motivo es obligatorio. La nota es opcional." : "Puedes añadir una observación de al menos 3 caracteres."}</p>}
       <p className="outcome-hint">Quedará registrado quién realizó la visita y los participantes de la cuadrilla.</p>
       {error && <p className="form-error">{error}</p>}
       <footer>
@@ -1228,11 +1488,12 @@ function TicketList({
               </div>
             </button>
             <div className="ticket-card-actions">
-              {mapHref(ticket) && <a className="ticket-work-map" href={mapHref(ticket)!} target="_blank" rel="noreferrer"><Icon name="pin" /> Cómo llegar</a>}
+              {ticket.status === "PENDING" && mapHref(ticket) && <a className="ticket-work-map" href={mapHref(ticket)!} target="_blank" rel="noreferrer"><Icon name="pin" /> Cómo llegar</a>}
+              {ticket.status === "IN_PROGRESS" && externalHref(ticket.customFields?.contrato) && <a className="ticket-work-map contract" href={externalHref(ticket.customFields.contrato)!} target="_blank" rel="noreferrer"><Icon name="link" /> Firmar contrato</a>}
               {canChangeTicketStatus(user, ticket) && <div className="ticket-work-actions" role="group" aria-label={`Acciones de TK-${ticket.number}`}>
                 {ticket.status === "PENDING" && <button className="start" type="button" disabled={changing === ticket.id} onClick={() => changeStatus(ticket, "IN_PROGRESS")}><Icon name="play" /> Iniciar trabajo</button>}
-                {ticket.status === "IN_PROGRESS" && <button className="done" type="button" disabled={changing === ticket.id} onClick={() => changeStatus(ticket, "RESOLVED")}><Icon name="check" /> Realizado</button>}
-                {ticket.status === "IN_PROGRESS" && <button className="failed" type="button" disabled={changing === ticket.id} onClick={(event) => { failureTriggerRef.current = event.currentTarget; setFailedTicket(ticket.id); setFailureNote(""); }}><Icon name="close" /> No se pudo realizar</button>}
+                {ticket.status === "IN_PROGRESS" && <button className="done" type="button" disabled={changing === ticket.id} onClick={() => changeStatus(ticket, "RESOLVED")}><Icon name="check" /> Finalizar tarea</button>}
+                {ticket.status === "IN_PROGRESS" && <button className="failed" type="button" disabled={changing === ticket.id} onClick={(event) => { failureTriggerRef.current = event.currentTarget; setFailedTicket(ticket.id); setFailureNote(""); }}><Icon name="close" /> No se pudo terminar el trabajo</button>}
               </div>}
             </div>
             <button
@@ -1374,8 +1635,8 @@ function TicketDetail({
             </div>
           </div>
         </section>
-        {canChangeStatus && (
-          <section className="detail-section">
+        {canChangeStatus && user.role !== "TECHNICIAN" && (
+          <section className="detail-section status-section">
             <div className="section-label"><span>Estado del trabajo</span><Icon name="pulse" /></div>
             <div className="segmented status-quick" role="group" aria-label="Estado del trabajo">
               {(Object.keys(statusLabels) as TicketStatus[]).map((key) => <button key={key} type="button" className={ticket.status === key ? "active" : ""} aria-pressed={ticket.status === key} disabled={busy} onClick={() => changeStatus(key)}>{statusLabels[key]}</button>)}
@@ -1390,12 +1651,8 @@ function TicketDetail({
           <p className="description">
             {ticket.description || "Sin descripción adicional."}
           </p>
-          {Object.keys(ticket.customFields || {}).length > 0 && (
+          {Object.entries(ticket.customFields || {}).some(([key]) => key !== "mapa" && key !== "contrato") && (
             <>
-              <div className="ticket-resource-actions">
-                {mapHref(ticket) && <a className="custom-field-button" href={mapHref(ticket)!} target="_blank" rel="noreferrer"><Icon name="pin" />Cómo llegar</a>}
-                {externalHref(ticket.customFields?.contrato) ? <a className="custom-field-button" href={externalHref(ticket.customFields.contrato)!} target="_blank" rel="noreferrer"><Icon name="link" />Ver contrato</a> : ticket.category.code === "installation" && <span className="resource-missing"><Icon name="link" />Contrato pendiente</span>}
-              </div>
               <dl className="custom-fields">
               {Object.entries(ticket.customFields).filter(([key]) => key !== "mapa" && key !== "contrato").map(([key, value]) => {
                 return <div key={key}>

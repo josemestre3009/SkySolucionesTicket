@@ -1,6 +1,6 @@
 import { DailyTicketOutcome } from '@prisma/client';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { ArrayMaxSize, ArrayUnique, IsArray, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { ArrayMaxSize, ArrayUnique, IsArray, IsDateString, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class PlanningDateDto {
   @ApiProperty({ example: '2026-11-03' })
@@ -21,7 +21,15 @@ export class AssignDailyTicketsDto {
   @ApiProperty({ type: [String] }) @IsArray() @ArrayUnique() @ArrayMaxSize(200) @IsUUID('4', { each: true }) ticketIds!: string[];
 }
 
-export class UpdateDailyTicketOutcomeDto {
+export class ExecuteDailyTicketDto {
+  @ApiPropertyOptional({ description: 'Identificador idempotente generado por el cliente offline.' })
+  @IsOptional() @IsUUID() clientOperationId?: string;
+
+  @ApiPropertyOptional({ description: 'Momento real de la acción en el dispositivo.' })
+  @IsOptional() @IsDateString() executedAt?: string;
+}
+
+export class UpdateDailyTicketOutcomeDto extends ExecuteDailyTicketDto {
   @ApiProperty({ enum: [DailyTicketOutcome.DONE, DailyTicketOutcome.NOT_DONE] })
   @IsIn([DailyTicketOutcome.DONE, DailyTicketOutcome.NOT_DONE])
   outcome!: "DONE" | "NOT_DONE";

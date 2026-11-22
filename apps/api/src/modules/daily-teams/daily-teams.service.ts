@@ -2,8 +2,8 @@ import { BadRequestException, ConflictException, ForbiddenException, Injectable,
 import { DailyTicketOutcome, Prisma, Role, TicketStatus } from '@prisma/client';
 import { Principal } from '../../common/principal';
 import { PrismaService } from '../../infrastructure/prisma.service';
-import { AssignDailyTicketsDto, CreateDailyTeamDto, UpdateDailyTeamDto, UpdateDailyTicketOutcomeDto } from './daily-teams.dto';
-import { buildParticipantSnapshot, canTechnicianOperate, missingNotDoneContext } from './daily-execution';
+import { AssignDailyTicketsDto, CreateDailyTeamDto, ExecuteDailyTicketDto, UpdateDailyTeamDto, UpdateDailyTicketOutcomeDto } from './daily-teams.dto';
+import { buildParticipantSnapshot, executionAllowed, executionTimestamp, missingNotDoneContext } from './daily-execution';
 import { currentPlanningWorkDate, planningDate } from './planning-date';
 
 const ticketBaseInclude = { customer: true, category: true, assignedTo: { select: { id: true, name: true } }, pendingReason: true } as const;
@@ -19,6 +19,8 @@ const resultInclude = Prisma.validator<Prisma.DailyTeamTicketInclude>()({
   completedBy: completionInclude,
   pendingReason: { select: { id: true, name: true } },
 });
+type ExecutionResult = Prisma.DailyTeamTicketGetPayload<{ include: typeof resultInclude }>;
+const DATE_FIELDS = new Set(['createdAt', 'updatedAt', 'startedAt', 'completedAt', 'deferredTo', 'workDate', 'resolvedAt', 'scheduledAt']);
 const ticketInclude = (workDate: Date) => Prisma.validator<Prisma.TicketInclude>()({
   ...ticketBaseInclude,
   dailyTeamAssignments: {
@@ -105,97 +107,122 @@ export class DailyTeamsService {
     });
   }
 
-  async start(teamId: string, ticketId: string, principal: Principal) {
-    const now = new Date();
-    return this.prisma.$transaction(async (tx) => {
-      await this.lockTicket(tx, ticketId);
-      const assignment = await this.assignment(tx, teamId, ticketId);
-      this.assertOperationalAccess(principal, assignment);
-      await this.assertNoLaterAssignment(tx, assignment);
-      if (assignment.outcome !== DailyTicketOutcome.PENDING) throw new ConflictException('La visita ya fue finalizada.');
-      if (assignment.ticket.status === TicketStatus.RESOLVED) throw new BadRequestException('El ticket ya está realizado.');
-      await this.snapshotParticipants(tx, assignment.id, assignment.dailyTeam.members);
-      const result = await tx.dailyTeamTicket.updateMany({
-        where: { id: assignment.id, outcome: DailyTicketOutcome.PENDING },
-        data: { startedAt: assignment.startedAt ?? now },
+  async start(teamId: string, ticketId: string, principal: Principal, dto: ExecuteDailyTicketDto = {}) {
+    const executedAt = executionTimestamp(dto.executedAt);
+    const operation = dto.clientOperationId ? await this.replayedOperation(dto.clientOperationId, principal, 'DAILY_TICKET_STARTED', teamId, ticketId) : null;
+    if (operation) return operation;
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await this.lockTicket(tx, ticketId);
+        const assignment = await this.assignment(tx, teamId, ticketId);
+        this.assertOperationalAccess(principal, assignment, executedAt);
+        await this.assertNoLaterAssignment(tx, assignment);
+        if (assignment.outcome !== DailyTicketOutcome.PENDING) throw new ConflictException('La visita ya fue finalizada.');
+        if (assignment.ticket.status === TicketStatus.RESOLVED) throw new BadRequestException('El ticket ya está realizado.');
+        await this.snapshotParticipants(tx, assignment.id, assignment.dailyTeam.members);
+        const result = await tx.dailyTeamTicket.updateMany({
+          where: { id: assignment.id, outcome: DailyTicketOutcome.PENDING },
+          data: { startedAt: assignment.startedAt ?? executedAt },
+        });
+        if (!result.count) throw new ConflictException('La visita ya fue finalizada por otro usuario.');
+        if (assignment.ticket.status !== TicketStatus.IN_PROGRESS) {
+          await tx.ticket.update({ where: { id: ticketId }, data: { status: TicketStatus.IN_PROGRESS } });
+        }
+        await tx.ticketEvent.create({ data: { ticketId, type: 'DAILY_TICKET_STARTED', actorId: principal.id, data: { teamId, date: assignment.workDate.toISOString().slice(0, 10), executedAt: executedAt.toISOString() } } });
+        const stored = await tx.dailyTeamTicket.findUniqueOrThrow({ where: { id: assignment.id }, include: resultInclude });
+        await this.recordOperation(tx, dto.clientOperationId, principal, 'DAILY_TICKET_STARTED', teamId, ticketId, stored);
+        return stored;
       });
-      if (!result.count) throw new ConflictException('La visita ya fue finalizada por otro usuario.');
-      if (assignment.ticket.status !== TicketStatus.IN_PROGRESS) {
-        await tx.ticket.update({ where: { id: ticketId }, data: { status: TicketStatus.IN_PROGRESS } });
+    } catch (error) {
+      if (dto.clientOperationId && this.isUniqueViolation(error)) {
+        const stored = await this.replayedOperation(dto.clientOperationId, principal, 'DAILY_TICKET_STARTED', teamId, ticketId);
+        if (stored) return stored;
       }
-      await tx.ticketEvent.create({ data: { ticketId, type: 'DAILY_TICKET_STARTED', actorId: principal.id, data: { teamId, date: assignment.workDate.toISOString().slice(0, 10) } } });
-      return tx.dailyTeamTicket.findUniqueOrThrow({ where: { id: assignment.id }, include: resultInclude });
-    });
+      throw error;
+    }
   }
 
   async updateOutcome(teamId: string, ticketId: string, dto: UpdateDailyTicketOutcomeDto, principal: Principal) {
     const note = dto.note?.trim() || null;
-    if (missingNotDoneContext(dto.outcome, note, dto.pendingReasonId)) {
-      throw new BadRequestException('Indique un motivo o una nota cuando la visita no se realizó.');
+    if (missingNotDoneContext(dto.outcome, dto.pendingReasonId)) {
+      throw new BadRequestException('Indique el motivo cuando la visita no se realizó.');
     }
-    const now = new Date();
-    return this.prisma.$transaction(async (tx) => {
-      await this.lockTicket(tx, ticketId);
-      const assignment = await this.assignment(tx, teamId, ticketId);
-      this.assertOperationalAccess(principal, assignment);
-      await this.assertNoLaterAssignment(tx, assignment);
-      if (assignment.outcome !== DailyTicketOutcome.PENDING) throw new ConflictException('La visita ya fue finalizada por otro usuario.');
-      if (dto.pendingReasonId) {
-        const reason = await tx.pendingReason.findFirst({ where: { id: dto.pendingReasonId, active: true } });
-        if (!reason) throw new BadRequestException('Motivo pendiente inválido.');
-      }
-      const deferredTo = dto.outcome === DailyTicketOutcome.NOT_DONE && dto.deferredTo ? planningDate(dto.deferredTo) : null;
-      if (deferredTo && deferredTo.getTime() <= assignment.workDate.getTime()) {
-        throw new BadRequestException('La nueva fecha debe ser posterior a la fecha de la visita.');
-      }
-      const deferredSchedule = deferredTo ? new Date(`${dto.deferredTo}T12:00:00.000Z`) : null;
-      const pendingReasonId = dto.outcome === DailyTicketOutcome.NOT_DONE ? dto.pendingReasonId ?? null : null;
-      await this.snapshotParticipants(tx, assignment.id, assignment.dailyTeam.members);
-      const result = await tx.dailyTeamTicket.updateMany({
-        where: { id: assignment.id, outcome: DailyTicketOutcome.PENDING },
-        data: {
-          outcome: dto.outcome,
-          outcomeNote: note,
-          pendingReasonId,
-          deferredTo,
-          completedAt: now,
-          completedById: principal.id,
-        },
-      });
-      if (!result.count) throw new ConflictException('La visita ya fue finalizada por otro usuario.');
-      if (dto.outcome === DailyTicketOutcome.DONE) {
-        await tx.ticket.update({
-          where: { id: ticketId },
-          data: { status: TicketStatus.RESOLVED, resolvedAt: now, pendingReasonId: null, pendingNote: null },
-        });
-      } else {
-        await tx.ticket.update({
-          where: { id: ticketId },
+    const executedAt = executionTimestamp(dto.executedAt);
+    const operation = dto.clientOperationId ? await this.replayedOperation(dto.clientOperationId, principal, 'DAILY_TICKET_OUTCOME', teamId, ticketId) : null;
+    if (operation) return operation;
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        await this.lockTicket(tx, ticketId);
+        const assignment = await this.assignment(tx, teamId, ticketId);
+        this.assertOperationalAccess(principal, assignment, executedAt);
+        await this.assertNoLaterAssignment(tx, assignment);
+        if (assignment.outcome !== DailyTicketOutcome.PENDING) throw new ConflictException('La visita ya fue finalizada por otro usuario.');
+        if (dto.pendingReasonId) {
+          const reason = await tx.pendingReason.findFirst({ where: { id: dto.pendingReasonId, active: true } });
+          if (!reason) throw new BadRequestException('Motivo pendiente inválido.');
+        }
+        const deferredTo = dto.outcome === DailyTicketOutcome.NOT_DONE && dto.deferredTo ? planningDate(dto.deferredTo) : null;
+        if (deferredTo && deferredTo.getTime() <= assignment.workDate.getTime()) {
+          throw new BadRequestException('La nueva fecha debe ser posterior a la fecha de la visita.');
+        }
+        const deferredSchedule = deferredTo ? new Date(`${dto.deferredTo}T12:00:00.000Z`) : null;
+        const pendingReasonId = dto.outcome === DailyTicketOutcome.NOT_DONE ? dto.pendingReasonId ?? null : null;
+        await this.snapshotParticipants(tx, assignment.id, assignment.dailyTeam.members);
+        const result = await tx.dailyTeamTicket.updateMany({
+          where: { id: assignment.id, outcome: DailyTicketOutcome.PENDING },
           data: {
-            status: TicketStatus.PENDING,
-            resolvedAt: null,
+            outcome: dto.outcome,
+            outcomeNote: note,
             pendingReasonId,
-            pendingNote: note,
-            ...(deferredSchedule ? { scheduledAt: deferredSchedule } : {}),
+            deferredTo,
+            completedAt: executedAt,
+            completedById: principal.id,
           },
         });
-      }
-      await tx.ticketEvent.create({
-        data: {
-          ticketId,
-          type: dto.outcome === DailyTicketOutcome.DONE ? 'DAILY_TICKET_DONE' : 'DAILY_TICKET_NOT_DONE',
-          actorId: principal.id,
+        if (!result.count) throw new ConflictException('La visita ya fue finalizada por otro usuario.');
+        if (dto.outcome === DailyTicketOutcome.DONE) {
+          await tx.ticket.update({
+            where: { id: ticketId },
+            data: { status: TicketStatus.RESOLVED, resolvedAt: executedAt, pendingReasonId: null, pendingNote: null },
+          });
+        } else {
+          await tx.ticket.update({
+            where: { id: ticketId },
+            data: {
+              status: TicketStatus.PENDING,
+              resolvedAt: null,
+              pendingReasonId,
+              pendingNote: note,
+              ...(deferredSchedule ? { scheduledAt: deferredSchedule } : {}),
+            },
+          });
+        }
+        await tx.ticketEvent.create({
           data: {
-            teamId,
-            date: assignment.workDate.toISOString().slice(0, 10),
-            note,
-            pendingReasonId,
-            deferredTo: deferredTo?.toISOString().slice(0, 10) ?? null,
+            ticketId,
+            type: dto.outcome === DailyTicketOutcome.DONE ? 'DAILY_TICKET_DONE' : 'DAILY_TICKET_NOT_DONE',
+            actorId: principal.id,
+            data: {
+              teamId,
+              date: assignment.workDate.toISOString().slice(0, 10),
+              note,
+              pendingReasonId,
+              deferredTo: deferredTo?.toISOString().slice(0, 10) ?? null,
+              executedAt: executedAt.toISOString(),
+            },
           },
-        },
+        });
+        const stored = await tx.dailyTeamTicket.findUniqueOrThrow({ where: { id: assignment.id }, include: resultInclude });
+        await this.recordOperation(tx, dto.clientOperationId, principal, 'DAILY_TICKET_OUTCOME', teamId, ticketId, stored);
+        return stored;
       });
-      return tx.dailyTeamTicket.findUniqueOrThrow({ where: { id: assignment.id }, include: resultInclude });
-    });
+    } catch (error) {
+      if (dto.clientOperationId && (this.isUniqueViolation(error) || (error instanceof ConflictException))) {
+        const stored = await this.replayedOperation(dto.clientOperationId, principal, 'DAILY_TICKET_OUTCOME', teamId, ticketId);
+        if (stored) return stored;
+      }
+      throw error;
+    }
   }
 
   async unassign(id: string, ticketId: string, principal: Principal) {
@@ -257,20 +284,36 @@ export class DailyTeamsService {
     const count = await this.prisma.user.count({ where: { id: { in: ids }, role: Role.TECHNICIAN, active: true } });
     if (count !== ids.length) throw new BadRequestException('Uno o más técnicos son inválidos o están inactivos.');
   }
-  private assertOperationalAccess(principal: Principal, assignment: { workDate: Date; dailyTeam: { members: { technicianId: string }[] } }) {
-    if (assignment.workDate.getTime() !== currentPlanningWorkDate().getTime()) {
+  private assertOperationalAccess(principal: Principal, assignment: { workDate: Date; dailyTeam: { members: { technicianId: string }[] } }, executedAt: Date) {
+    if (!executionAllowed(assignment.workDate, executedAt)) {
       throw new ForbiddenException('Solo se puede registrar la ejecución de la fecha actual.');
     }
     if (principal.kind !== 'user') throw new ForbiddenException('Solo usuarios pueden registrar la ejecución diaria.');
     if (principal.role === Role.ADMIN || principal.role === Role.TEAM_LEADER) return;
     if (principal.role !== Role.TECHNICIAN) throw new ForbiddenException('Permiso insuficiente.');
     const isMember = assignment.dailyTeam.members.some((member) => member.technicianId === principal.id);
-    if (!canTechnicianOperate(assignment.workDate, currentPlanningWorkDate(), isMember)) {
-      throw new ForbiddenException('Solo puede registrar visitas de su cuadrilla para el día de hoy.');
-    }
+    if (!isMember) throw new ForbiddenException('Solo puede registrar visitas de su cuadrilla para el día de hoy.');
   }
   private assertHumanManager(principal: Principal) {
     if (principal.kind !== 'user' || (principal.role !== Role.ADMIN && principal.role !== Role.TEAM_LEADER)) throw new ForbiddenException('Solo administradores y líderes pueden organizar cuadrillas.');
+  }
+  private async replayedOperation(id: string, principal: Principal, kind: string, teamId: string, ticketId: string): Promise<ExecutionResult | null> {
+    const operation = await this.prisma.offlineOperation.findUnique({ where: { id } });
+    if (!operation) return null;
+    if (operation.userId !== principal.id || operation.kind !== kind || operation.teamId !== teamId || operation.ticketId !== ticketId) {
+      throw new ConflictException('Identificador de operación ya utilizado.');
+    }
+    if (!operation.response) return null;
+    return JSON.parse(JSON.stringify(operation.response), (key, value) => typeof value === 'string' && DATE_FIELDS.has(key) ? new Date(value) : value) as ExecutionResult;
+  }
+  private async recordOperation(tx: Prisma.TransactionClient, id: string | undefined, principal: Principal, kind: string, teamId: string, ticketId: string, response: unknown) {
+    if (!id) return;
+    await tx.offlineOperation.create({
+      data: { id, userId: principal.id, kind, teamId, ticketId, response: JSON.parse(JSON.stringify(response)) as Prisma.InputJsonValue },
+    });
+  }
+  private isUniqueViolation(error: unknown) {
+    return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
   }
   private handleConflict(error: unknown): never {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new ConflictException('El nombre o uno de los técnicos ya está ocupado en otra cuadrilla ese día.');
