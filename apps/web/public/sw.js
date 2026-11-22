@@ -1,5 +1,6 @@
-// ponytail: bump CACHE on breaking shell changes; old hashed chunks age out with it.
-const CACHE = "sky-ticket-v2";
+// Docker replaces this token on every build so CSS-only releases also update installed PWAs.
+const VERSION = "__SKY_BUILD_ID__";
+const CACHE = `sky-ticket-${VERSION}`;
 const SHELL = ["/", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"];
 
 self.addEventListener("install", (event) => {
